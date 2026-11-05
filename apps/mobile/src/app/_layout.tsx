@@ -1,7 +1,8 @@
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
-import { AppState, View } from 'react-native';
+import { AppState, StyleSheet, View } from 'react-native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { ContainerProvider, useContainer } from '../core/container-context';
 import { useTheme } from '../design-system/theme';
@@ -21,18 +22,20 @@ function ForegroundSync() {
 export default function RootLayout() {
   const t = useTheme();
   return (
-    <SafeAreaProvider>
-      <StatusBar style="auto" />
-      <ContainerProvider fallback={<View style={{ flex: 1, backgroundColor: t.background }} />}>
-        <ForegroundSync />
-        <Stack
-          screenOptions={{
-            headerShown: false,
-            contentStyle: { backgroundColor: t.background },
-            animation: 'fade',
-          }}
-        />
-      </ContainerProvider>
-    </SafeAreaProvider>
+    <GestureHandlerRootView style={StyleSheet.absoluteFill}>
+      <SafeAreaProvider>
+        <StatusBar style="auto" />
+        <ContainerProvider fallback={<View style={{ flex: 1, backgroundColor: t.background }} />}>
+          <ForegroundSync />
+          <Stack
+            screenOptions={{
+              headerShown: false,
+              contentStyle: { backgroundColor: t.background },
+              animation: 'fade',
+            }}
+          />
+        </ContainerProvider>
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 }

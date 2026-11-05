@@ -47,6 +47,8 @@ export default function Settings() {
         <View style={[styles.group, styles.links]}>
           <PressableText label={copy.archiveTitle} onPress={() => router.push('/archive')} />
           <PressableText label={copy.trashTitle} onPress={() => router.push('/trash')} />
+          {/* Phase 4a only: measurement lab for the handwriting engine. Removed before release. */}
+          <PressableText label="Kalem laboratuvarı (deneysel)" onPress={() => router.push('/lab/handwriting')} />
         </View>
 
         <Text style={[type.overline, { color: t.muted, marginTop: space.xl }]}>{copy.account.section}</Text>

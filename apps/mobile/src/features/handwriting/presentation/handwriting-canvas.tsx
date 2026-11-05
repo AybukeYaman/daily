@@ -1,0 +1,330 @@
+import { MAX_COORD, type Tool } from '@daily/shared';
+import {
+  Canvas,
+  Path,
+  Picture,
+  Skia,
+  type SkPath,
+  type SkPathBuilder,
+  type SkPicture,
+} from '@shopify/react-native-skia';
+import { useEffect, useMemo, useRef } from 'react';
+import { StyleSheet } from 'react-native';
+import { GestureDetector, PointerType, usePanGesture } from 'react-native-gesture-handler';
+import { type SharedValue, useFrameCallback, useSharedValue } from 'react-native-reanimated';
+import { scheduleOnRN, scheduleOnUI } from 'react-native-worklets';
+import type { CanvasTool, HandwritingSession, StrokeStyle } from '../application/handwriting-session';
+import { emptyPicture, PictureCache } from './picture-cache';
+import { effectiveOpacity, effectiveWidth, makeStrokePaint } from './stroke-paint';
+
+/** Segments kept in the mutable tail before being frozen into a picture: bounds per-event cost. */
+const TAIL_SEGMENTS = 48;
+const CULL = Skia.XYWHRect(-MAX_COORD, -MAX_COORD, MAX_COORD * 2, MAX_COORD * 2);
+const PROBE_CAPACITY = 600;
+
+export interface LatencyProbe {
+  /** ms from a touch sample reaching the UI thread to the next frame callback. */
+  eventToFrame: SharedValue<number[]>;
+  /** ms between consecutive frames while drawing. */
+  frameIntervals: SharedValue<number[]>;
+  pendingEventAt: SharedValue<number>;
+}
+
+export function useLatencyProbe(): LatencyProbe {
+  return {
+    eventToFrame: useSharedValue<number[]>([]),
+    frameIntervals: useSharedValue<number[]>([]),
+    pendingEventAt: useSharedValue(0),
+  };
+}
+
+function now(): number {
+  'worklet';
+  return performance.now();
+}
+
+function pushCapped(sv: SharedValue<number[]>, v: number): void {
+  'worklet';
+  sv.modify((arr) => {
+    'worklet';
+    arr.push(v);
+    if (arr.length > PROBE_CAPACITY) arr.shift();
+    return arr;
+  }, false);
+}
+
+function recordPicture(draw: (canvas: ReturnType<ReturnType<typeof Skia.PictureRecorder>['beginRecording']>) => void): SkPicture {
+  'worklet';
+  const rec = Skia.PictureRecorder();
+  draw(rec.beginRecording(CULL));
+  return rec.finishRecordingAsPicture();
+}
+
+interface Props {
+  session: HandwritingSession;
+  tool: CanvasTool;
+  color: string;
+  width: number;
+  /** Ignore finger touches (palm rejection) when a stylus is in use. */
+  stylusOnly?: boolean;
+  /** Bump after undo/redo/clear done by the parent, to re-record committed strokes. */
+  revision: number;
+  onChange?: () => void;
+  probe?: LatencyProbe;
+}
+
+/**
+ * Drawing happens entirely on the UI thread:
+ *   touch → worklet → PathBuilder tail (≤ 48 segments) + frozen prefix picture → Skia
+ * React never re-renders while a stroke is drawn. On lift, raw samples go to JS,
+ * which simplifies, commits and appends them to the committed picture; until
+ * that lands, the finished stroke stays visible in a UI-side pending picture,
+ * so nothing flickers even if the next stroke starts immediately.
+ */
+export function HandwritingCanvas({ session, tool, color, width, stylusOnly = false, revision, onChange, probe }: Props) {
+  const cache = useRef(new PictureCache()).current;
+  const blank = useMemo(() => emptyPicture(), []);
+  const blankPath = useMemo(() => Skia.Path.Make(), []);
+
+  // Rendered values
+  const committed = useSharedValue<SkPicture>(blank);
+  const pending = useSharedValue<SkPicture>(blank);
+  const prefix = useSharedValue<SkPicture>(blank);
+  const tail = useSharedValue<SkPath>(blankPath);
+  const tip = useSharedValue<SkPath>(blankPath);
+  const liveColor = useSharedValue(color);
+  const liveWidth = useSharedValue(effectiveWidth('pen', width));
+  const liveOpacity = useSharedValue(1);
+
+  // Tool settings mirrored to the UI thread
+  const toolSv = useSharedValue<CanvasTool>(tool);
+  const colorSv = useSharedValue(color);
+  const widthSv = useSharedValue(width);
+  const stylusOnlySv = useSharedValue(stylusOnly);
+  useEffect(() => {
+    toolSv.value = tool;
+    colorSv.value = color;
+    widthSv.value = width;
+    stylusOnlySv.value = stylusOnly;
+  }, [tool, color, width, stylusOnly, toolSv, colorSv, widthSv, stylusOnlySv]);
+
+  // UI-thread stroke state
+  const builder = useSharedValue<SkPathBuilder | null>(null);
+  const samples = useSharedValue<number[]>([]);
+  const segments = useSharedValue(0);
+  const startTime = useSharedValue(0);
+  const startEpoch = useSharedValue(0);
+  const prevX = useSharedValue(0);
+  const prevY = useSharedValue(0);
+  const active = useSharedValue(false);
+  const hasPressure = useSharedValue(false);
+  // Style captured at touch-down: changing tools mid-stroke never alters the stroke in progress.
+  const liveTool = useSharedValue<Tool>('pen');
+  const liveBaseWidth = useSharedValue(width);
+  const generation = useSharedValue(0);
+  const pendingStrokes = useSharedValue<{ gen: number; picture: SkPicture }[]>([]);
+  const lastEraseX = useSharedValue(0);
+  const lastEraseY = useSharedValue(0);
+
+  // Committed picture follows the document (undo/redo/erase from the parent).
+  useEffect(() => {
+    committed.value = cache.rebuild(session.doc.all);
+  }, [revision, session, cache, committed]);
+
+  // --- JS-thread handlers ------------------------------------------------------
+  const dropPending = (gen: number) => {
+    'worklet';
+    pendingStrokes.value = pendingStrokes.value.filter((p) => p.gen !== gen);
+    const list = pendingStrokes.value;
+    pending.value = recordPicture((c) => {
+      for (const p of list) c.drawPicture(p.picture);
+    });
+  };
+
+  const commitOnJS = (raw: number[], style: StrokeStyle, startedAt: number, gen: number) => {
+    const stroke = session.commit(raw, style, startedAt);
+    if (stroke) committed.value = cache.append(stroke, session.doc.all);
+    scheduleOnUI(dropPending, gen); // queued after the picture update: no gap, no double draw
+    onChange?.();
+  };
+
+  const eraseOnJS = (x: number, y: number, radius: number) => {
+    if (session.erase(x, y, radius) > 0) {
+      committed.value = cache.rebuild(session.doc.all);
+      onChange?.();
+    }
+  };
+
+  // --- UI-thread gesture ---------------------------------------------------------
+  const markEvent = () => {
+    'worklet';
+    if (probe && probe.pendingEventAt.value === 0) probe.pendingEventAt.value = now();
+  };
+
+  const pushSample = (x: number, y: number, pointer: PointerType, pressure: number, altitude: number, azimuth: number) => {
+    'worklet';
+    const stylus = pointer === PointerType.STYLUS;
+    const t = now() - startTime.value;
+    samples.modify((arr) => {
+      'worklet';
+      arr.push(
+        x,
+        y,
+        t,
+        stylus ? pressure : 0.5,
+        stylus ? altitude / (Math.PI / 2) : 1,
+        stylus ? azimuth / (Math.PI * 2) : 0,
+      );
+      return arr;
+    }, false);
+  };
+
+  const pan = usePanGesture({
+    minDistance: 0,
+    maxPointers: 1,
+    shouldCancelWhenOutside: false,
+    onBegin: (e) => {
+      'worklet';
+      if (stylusOnlySv.value && e.pointerType !== PointerType.STYLUS) return;
+      if (toolSv.value === 'eraser') {
+        lastEraseX.value = e.x;
+        lastEraseY.value = e.y;
+        scheduleOnRN(eraseOnJS, e.x, e.y, widthSv.value * 3);
+        return;
+      }
+      const t: Tool = toolSv.value;
+      active.value = true;
+      hasPressure.value = e.pointerType === PointerType.STYLUS;
+      startTime.value = now();
+      startEpoch.value = Date.now();
+      samples.value = [];
+      pushSample(e.x, e.y, e.pointerType, e.stylusData?.pressure ?? 0.5, e.stylusData?.altitudeAngle ?? 0, e.stylusData?.azimuthAngle ?? 0);
+      prevX.value = e.x;
+      prevY.value = e.y;
+      segments.value = 0;
+
+      liveTool.value = t;
+      liveBaseWidth.value = widthSv.value;
+      liveColor.value = colorSv.value;
+      liveWidth.value = effectiveWidth(t, widthSv.value);
+      liveOpacity.value = effectiveOpacity(t);
+
+      const b = Skia.PathBuilder.Make();
+      b.moveTo(e.x, e.y);
+      builder.value = b;
+      prefix.value = recordPicture(() => {});
+      tail.value = blankPath;
+      // A dot appears under the finger on touch-down, before any movement.
+      tip.value = Skia.PathBuilder.Make().moveTo(e.x, e.y).lineTo(e.x + 0.01, e.y).detach();
+      markEvent();
+    },
+    onUpdate: (e) => {
+      'worklet';
+      if (toolSv.value === 'eraser') {
+        if (stylusOnlySv.value && e.pointerType !== PointerType.STYLUS) return;
+        const r = widthSv.value * 3;
+        const dx = e.x - lastEraseX.value;
+        const dy = e.y - lastEraseY.value;
+        if (dx * dx + dy * dy >= (r / 2) * (r / 2)) {
+          lastEraseX.value = e.x;
+          lastEraseY.value = e.y;
+          scheduleOnRN(eraseOnJS, e.x, e.y, r);
+        }
+        return;
+      }
+      const b = builder.value;
+      if (!active.value || !b) return;
+      pushSample(e.x, e.y, e.pointerType, e.stylusData?.pressure ?? 0.5, e.stylusData?.altitudeAngle ?? 0, e.stylusData?.azimuthAngle ?? 0);
+
+      // Same smoothing as the committed stroke: quad through midpoints, previous sample as control.
+      const mx = (prevX.value + e.x) / 2;
+      const my = (prevY.value + e.y) / 2;
+      b.quadTo(prevX.value, prevY.value, mx, my);
+      prevX.value = e.x;
+      prevY.value = e.y;
+      segments.value += 1;
+
+      if (segments.value >= TAIL_SEGMENTS) {
+        // Freeze the tail into the prefix picture and restart the builder at the join point.
+        const frozenTail = b.build();
+        const prev = prefix.value;
+        const paint = makeStrokePaint(liveTool.value, liveColor.value, liveBaseWidth.value);
+        prefix.value = recordPicture((c) => {
+          c.drawPicture(prev);
+          c.drawPath(frozenTail, paint);
+        });
+        b.reset();
+        b.moveTo(mx, my);
+        segments.value = 0;
+        tail.value = blankPath;
+      } else {
+        tail.value = b.build();
+      }
+      // Ink reaches the finger: straight tip from the last midpoint to the current sample.
+      tip.value = Skia.PathBuilder.Make().moveTo(mx, my).lineTo(e.x, e.y).detach();
+      markEvent();
+    },
+    onFinalize: () => {
+      'worklet';
+      const b = builder.value;
+      if (!active.value || !b) return;
+      active.value = false;
+      b.lineTo(prevX.value, prevY.value);
+      const finalTail = b.detach();
+      builder.value = null;
+
+      const t = liveTool.value;
+      const paint = makeStrokePaint(t, liveColor.value, liveBaseWidth.value);
+      const prev = prefix.value;
+      const strokePicture = recordPicture((c) => {
+        c.drawPicture(prev);
+        c.drawPath(finalTail, paint);
+      });
+      generation.value += 1;
+      const gen = generation.value;
+      pendingStrokes.value = [...pendingStrokes.value, { gen, picture: strokePicture }];
+      const before = pending.value;
+      pending.value = recordPicture((c) => {
+        c.drawPicture(before);
+        c.drawPicture(strokePicture);
+      });
+
+      prefix.value = blank;
+      tail.value = blankPath;
+      tip.value = blankPath;
+
+      const style: StrokeStyle = {
+        tool: t,
+        color: liveColor.value,
+        width: liveBaseWidth.value,
+        hasPressure: hasPressure.value,
+        hasTilt: hasPressure.value,
+      };
+      scheduleOnRN(commitOnJS, samples.value, style, startEpoch.value, gen);
+    },
+  });
+
+  // Latency probe: only runs when a probe is attached (measurement lab).
+  useFrameCallback((frame) => {
+    'worklet';
+    if (!probe) return;
+    if (frame.timeSincePreviousFrame !== null && active.value) pushCapped(probe.frameIntervals, frame.timeSincePreviousFrame);
+    const at = probe.pendingEventAt.value;
+    if (at > 0) {
+      pushCapped(probe.eventToFrame, now() - at);
+      probe.pendingEventAt.value = 0;
+    }
+  }, probe !== undefined);
+
+  return (
+    <GestureDetector gesture={pan}>
+      <Canvas style={StyleSheet.absoluteFill}>
+        <Picture picture={committed} />
+        <Picture picture={pending} />
+        <Picture picture={prefix} />
+        <Path path={tail} color={liveColor} strokeWidth={liveWidth} opacity={liveOpacity} style="stroke" strokeCap="round" strokeJoin="round" />
+        <Path path={tip} color={liveColor} strokeWidth={liveWidth} opacity={liveOpacity} style="stroke" strokeCap="round" strokeJoin="round" />
+      </Canvas>
+    </GestureDetector>
+  );
+}
