@@ -1,9 +1,10 @@
 import { useFocusEffect } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
-import { FlatList, Text } from 'react-native';
+import Animated from 'react-native-reanimated';
 import type { EntrySummary, TimelineCursor } from '../core/application/ports';
 import { useContainer } from '../core/container-context';
 import { copy } from '../design-system/copy';
+import { fadeIn, freshWindow, listLayout } from '../design-system/motion';
 import { Screen } from '../design-system/screen';
 import { type, useTheme } from '../design-system/theme';
 import { EntryRow } from '../features/journaling/presentation/entry-row';
@@ -15,6 +16,7 @@ export default function ArchiveScreen() {
   const { journal } = useContainer();
   const [items, setItems] = useState<EntrySummary[] | null>(null);
   const next = useRef<TimelineCursor | null>(null);
+  const fresh = useRef(freshWindow()).current;
 
   useFocusEffect(
     useCallback(() => {
@@ -22,12 +24,13 @@ export default function ArchiveScreen() {
       void journal.archived(PAGE).then((p) => {
         if (!active) return;
         next.current = p.next;
+        fresh.markLoaded();
         setItems(p.items);
       });
       return () => {
         active = false;
       };
-    }, [journal]),
+    }, [journal, fresh]),
   );
 
   const loadMore = async () => {
@@ -41,12 +44,19 @@ export default function ArchiveScreen() {
 
   return (
     <Screen title={copy.archiveTitle}>
-      <FlatList
+      <Animated.FlatList
         data={items ?? []}
+        itemLayoutAnimation={listLayout}
         keyExtractor={(e) => e.id}
-        renderItem={({ item }) => <EntryRow item={item} />}
+        renderItem={({ item, index }) => <EntryRow item={item} index={index} animateIn={fresh.isFresh()} />}
         onEndReached={() => void loadMore()}
-        ListEmptyComponent={items ? <Text style={[type.ui, { color: t.muted }]}>{copy.archiveEmpty}</Text> : undefined}
+        ListEmptyComponent={
+          items ? (
+            <Animated.Text entering={fadeIn} style={[type.ui, { color: t.muted }]}>
+              {copy.archiveEmpty}
+            </Animated.Text>
+          ) : undefined
+        }
       />
     </Screen>
   );

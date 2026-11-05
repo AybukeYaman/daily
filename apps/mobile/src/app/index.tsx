@@ -1,11 +1,14 @@
 import { localIsoDate } from '@daily/shared';
 import { router } from 'expo-router';
 import { useCallback } from 'react';
-import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
+import Animated from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { EntrySummary } from '../core/application/ports';
 import { useContainer, useObservable } from '../core/container-context';
 import { copy, formatDay } from '../design-system/copy';
+import { fadeIn, listLayout } from '../design-system/motion';
+import { PressScale } from '../design-system/press-scale';
 import { PressableText } from '../design-system/pressable-text';
 import { space, type, useTheme } from '../design-system/theme';
 import { EntryRow } from '../features/journaling/presentation/entry-row';
@@ -15,8 +18,11 @@ export default function Home() {
   const t = useTheme();
   const { sync } = useContainer();
   const status = useObservable(sync.status);
-  const { items, loaded, loadMore } = useTimeline();
-  const renderItem = useCallback(({ item }: { item: EntrySummary }) => <EntryRow item={item} />, []);
+  const { items, loaded, loadMore, isFresh } = useTimeline();
+  const renderItem = useCallback(
+    ({ item, index }: { item: EntrySummary; index: number }) => <EntryRow item={item} index={index} animateIn={isFresh()} />,
+    [isFresh],
+  );
 
   const header = (
     <View style={styles.header}>
@@ -28,30 +34,36 @@ export default function Home() {
           <PressableText label={copy.settings} onPress={() => router.push('/settings')} />
         </View>
       </View>
-      <Pressable onPress={() => router.push('/entry/new')} accessibilityRole="button" hitSlop={8}>
+      <PressScale onPress={() => router.push('/entry/new')} accessibilityRole="button" hitSlop={8} scaleTo={0.98}>
         <Text style={[type.title, { color: t.faint }]}>{copy.writePrompt}</Text>
-      </Pressable>
+      </PressScale>
       {status.phase !== 'synced' && status.phase !== 'syncing' ? (
-        <Text style={[type.small, { color: t.muted, marginTop: space.s }]}>{copy.sync[status.phase]}</Text>
+        <Animated.Text key={status.phase} entering={fadeIn} style={[type.small, { color: t.muted, marginTop: space.s }]}>
+          {copy.sync[status.phase]}
+        </Animated.Text>
       ) : null}
     </View>
   );
 
   return (
     <SafeAreaView style={[styles.fill, { backgroundColor: t.background }]} edges={['top']}>
-      <FlatList
+      <Animated.FlatList
         data={items}
+        itemLayoutAnimation={listLayout}
         keyExtractor={(e) => e.id}
         renderItem={renderItem}
         ListHeaderComponent={header}
         ListEmptyComponent={
-          loaded ? <Text style={[type.ui, styles.empty, { color: t.muted }]}>{copy.emptyJournal}</Text> : undefined
+          loaded ? (
+            <Animated.Text entering={fadeIn} style={[type.ui, styles.empty, { color: t.muted }]}>
+              {copy.emptyJournal}
+            </Animated.Text>
+          ) : undefined
         }
         onEndReached={loadMore}
         onEndReachedThreshold={0.5}
         initialNumToRender={12}
         windowSize={7}
-        removeClippedSubviews
         contentContainerStyle={styles.list}
       />
     </SafeAreaView>

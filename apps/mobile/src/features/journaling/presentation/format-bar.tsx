@@ -1,7 +1,10 @@
 import { memo, type RefObject, useEffect, useState, useSyncExternalStore } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text } from 'react-native';
+import Animated from 'react-native-reanimated';
 import type { EnrichedTextInputInstance, OnChangeStateEvent } from 'react-native-enriched-html';
 import { observable, type Observable } from '../../../core/application/observable';
+import { barEntering, barExiting, haptic } from '../../../design-system/motion';
+import { PressScale } from '../../../design-system/press-scale';
 import { space, useTheme } from '../../../design-system/theme';
 
 type Active = Record<'bold' | 'italic' | 'underline' | 'h2' | 'ul' | 'ol' | 'quote', boolean>;
@@ -59,11 +62,20 @@ export const FormatBar = memo(function FormatBar({ editorRef, state, focused }: 
 
   if (!visible) return null;
   return (
-    <View style={[styles.bar, { borderTopColor: t.hairline, backgroundColor: t.background }]}>
+    <Animated.View
+      entering={barEntering}
+      exiting={barExiting}
+      style={[styles.bar, { borderTopColor: t.hairline, backgroundColor: t.background }]}
+    >
       {BUTTONS.map((b) => (
-        <Pressable
+        <PressScale
           key={b.key}
-          onPress={() => editorRef.current && b.run(editorRef.current)}
+          scaleTo={0.85}
+          onPress={() => {
+            if (!editorRef.current) return;
+            haptic.select();
+            b.run(editorRef.current);
+          }}
           accessibilityRole="button"
           accessibilityLabel={b.a11y}
           accessibilityState={{ selected: active[b.key] }}
@@ -71,9 +83,9 @@ export const FormatBar = memo(function FormatBar({ editorRef, state, focused }: 
           style={styles.button}
         >
           <Text style={[styles.label, b.style, { color: active[b.key] ? t.accent : t.muted }]}>{b.label}</Text>
-        </Pressable>
+        </PressScale>
       ))}
-    </View>
+    </Animated.View>
   );
 });
 

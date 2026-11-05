@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import { FlatList, StyleSheet, Text, TextInput, View } from 'react-native';
+import { StyleSheet, TextInput, View } from 'react-native';
+import Animated from 'react-native-reanimated';
 import type { EntrySummary } from '../core/application/ports';
 import { useContainer } from '../core/container-context';
 import { copy } from '../design-system/copy';
+import { fadeIn, freshWindow, haptic, listLayout } from '../design-system/motion';
 import { PressableText } from '../design-system/pressable-text';
 import { Screen } from '../design-system/screen';
 import { space, type, useTheme } from '../design-system/theme';
@@ -19,6 +21,7 @@ export default function SearchScreen() {
   const [includeArchived, setIncludeArchived] = useState(false);
   const [results, setResults] = useState<EntrySummary[] | null>(null);
   const requestId = useRef(0);
+  const fresh = useRef(freshWindow()).current;
 
   useEffect(() => {
     if (text.trim() === '' && !favoritesOnly) {
@@ -28,11 +31,13 @@ export default function SearchScreen() {
     const id = ++requestId.current;
     const timer = setTimeout(() => {
       void journal.search({ text, favoritesOnly, includeArchived, limit: 50 }).then((r) => {
-        if (id === requestId.current) setResults(r);
+        if (id !== requestId.current) return;
+        fresh.markLoaded();
+        setResults(r);
       });
     }, DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [journal, text, favoritesOnly, includeArchived]);
+  }, [journal, text, favoritesOnly, includeArchived, fresh]);
 
   return (
     <Screen>
@@ -47,16 +52,37 @@ export default function SearchScreen() {
         style={[type.title, { color: t.text }]}
       />
       <View style={styles.filters}>
-        <PressableText label={copy.favoritesOnly} onPress={() => setFavoritesOnly((v) => !v)} tone={favoritesOnly ? 'accent' : 'muted'} />
-        <PressableText label={copy.includeArchived} onPress={() => setIncludeArchived((v) => !v)} tone={includeArchived ? 'accent' : 'muted'} />
+        <PressableText
+          label={copy.favoritesOnly}
+          tone={favoritesOnly ? 'accent' : 'muted'}
+          onPress={() => {
+            haptic.select();
+            setFavoritesOnly((v) => !v);
+          }}
+        />
+        <PressableText
+          label={copy.includeArchived}
+          tone={includeArchived ? 'accent' : 'muted'}
+          onPress={() => {
+            haptic.select();
+            setIncludeArchived((v) => !v);
+          }}
+        />
       </View>
-      <FlatList
+      <Animated.FlatList
         data={results ?? []}
+        itemLayoutAnimation={listLayout}
         keyExtractor={(e) => e.id}
-        renderItem={({ item }) => <EntryRow item={item} />}
+        renderItem={({ item, index }) => <EntryRow item={item} index={index} animateIn={fresh.isFresh()} />}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
-        ListEmptyComponent={results ? <Text style={[type.ui, { color: t.muted }]}>{copy.searchEmpty}</Text> : undefined}
+        ListEmptyComponent={
+          results ? (
+            <Animated.Text entering={fadeIn} style={[type.ui, { color: t.muted }]}>
+              {copy.searchEmpty}
+            </Animated.Text>
+          ) : undefined
+        }
       />
     </Screen>
   );

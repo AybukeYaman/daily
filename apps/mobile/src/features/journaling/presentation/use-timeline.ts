@@ -2,6 +2,7 @@ import { useFocusEffect } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
 import type { EntrySummary, TimelineCursor } from '../../../core/application/ports';
 import { useContainer } from '../../../core/container-context';
+import { freshWindow } from '../../../design-system/motion';
 
 const PAGE = 30;
 
@@ -12,6 +13,7 @@ export function useTimeline() {
   const [loaded, setLoaded] = useState(false);
   const next = useRef<TimelineCursor | null>(null);
   const loadingMore = useRef(false);
+  const fresh = useRef(freshWindow()).current;
 
   useFocusEffect(
     useCallback(() => {
@@ -19,13 +21,14 @@ export function useTimeline() {
       void journal.timeline(PAGE).then((page) => {
         if (!active) return;
         next.current = page.next;
+        fresh.markLoaded(); // rows mounted by this load (e.g. a new entry) animate in; existing rows stay put
         setItems(page.items);
         setLoaded(true);
       });
       return () => {
         active = false;
       };
-    }, [journal]),
+    }, [journal, fresh]),
   );
 
   const loadMore = useCallback(async () => {
@@ -40,5 +43,5 @@ export function useTimeline() {
     }
   }, [journal]);
 
-  return { items, loaded, loadMore };
+  return { items, loaded, loadMore, isFresh: fresh.isFresh };
 }

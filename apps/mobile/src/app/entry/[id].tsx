@@ -1,15 +1,19 @@
 import { router, useLocalSearchParams } from 'expo-router';
 import { useRef, useState } from 'react';
-import { Alert, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { EnrichedTextInput } from 'react-native-enriched-html';
+import Animated from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { copy, formatDay } from '../../design-system/copy';
+import { FavoriteToggle } from '../../design-system/favorite-toggle';
+import { fadeIn, fadeOut, haptic } from '../../design-system/motion';
 import { PressableText } from '../../design-system/pressable-text';
 import { Sheet } from '../../design-system/sheet';
 import { space, type, useTheme } from '../../design-system/theme';
 import { monthOf } from '../../features/calendar/application/month';
 import { MonthView } from '../../features/calendar/presentation/month-view';
 import { createFormatState, FormatBar, toActive } from '../../features/journaling/presentation/format-bar';
+import { useCalmSaveState } from '../../features/journaling/presentation/use-calm-save-state';
 import { useEntryEditor } from '../../features/journaling/presentation/use-entry-editor';
 
 /** Markdown-style shortcuts: format without leaving the keyboard. */
@@ -20,10 +24,13 @@ const SHORTCUTS = [
   { trigger: '## ', style: 'h2' as const },
 ];
 
+const AnimatedKeyboardAvoidingView = Animated.createAnimatedComponent(KeyboardAvoidingView);
+
 export default function EntryScreen() {
   const t = useTheme();
   const { id, date } = useLocalSearchParams<{ id: string; date?: string }>();
   const editor = useEntryEditor(id ?? 'new', date);
+  const saveLabel = useCalmSaveState(editor.saveState);
   const { initial, meta } = editor;
   const formatState = useRef(createFormatState()).current;
   const [sheet, setSheet] = useState<'none' | 'menu' | 'date'>('none');
@@ -39,7 +46,14 @@ export default function EntryScreen() {
     setSheet('none');
     Alert.alert(copy.deleteConfirmTitle, copy.deleteConfirmBody, [
       { text: copy.cancel, style: 'cancel' },
-      { text: copy.delete, style: 'destructive', onPress: () => void editor.remove().then(goBack) },
+      {
+        text: copy.delete,
+        style: 'destructive',
+        onPress: () => {
+          haptic.warning();
+          void editor.remove().then(goBack);
+        },
+      },
     ]);
   };
 
@@ -62,26 +76,29 @@ export default function EntryScreen() {
     <SafeAreaView style={[styles.fill, { backgroundColor: t.background }]}>
       <View style={styles.topBar}>
         <PressableText label={`‹ ${copy.back}`} onPress={goBack} />
-        <Text style={[type.small, { color: editor.saveState === 'error' ? t.danger : t.faint }]}>
-          {copy.save[editor.saveState]}
-        </Text>
+        {/* Crossfades only when the state changes; quick saves never flash "saving". */}
+        <Animated.Text
+          key={saveLabel}
+          entering={fadeIn}
+          exiting={fadeOut}
+          style={[type.small, { color: editor.saveState === 'error' ? t.danger : t.faint }]}
+        >
+          {copy.save[saveLabel]}
+        </Animated.Text>
         <View style={styles.topActions}>
-          <PressableText
-            label={meta.favorite ? '★' : '☆'}
-            onPress={() => editor.setFavorite(!meta.favorite)}
-            tone={meta.favorite ? 'accent' : 'muted'}
-            style={styles.icon}
-          />
+          <FavoriteToggle value={meta.favorite} onChange={editor.setFavorite} />
           <PressableText label="•••" onPress={() => setSheet('menu')} disabled={!initial} />
         </View>
       </View>
 
       {initial ? (
-        <KeyboardAvoidingView style={styles.fill} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <AnimatedKeyboardAvoidingView entering={fadeIn} style={styles.fill} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
           <ScrollView contentContainerStyle={styles.page} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive">
             <PressableText label={formatDay(meta.entryDate)} onPress={() => setSheet('date')} style={type.small} />
             {initial.isConflictCopy ? (
-              <Text style={[type.small, styles.banner, { color: t.muted, backgroundColor: t.surface }]}>{copy.conflictCopy}</Text>
+              <Animated.Text entering={fadeIn} style={[type.small, styles.banner, { color: t.muted, backgroundColor: t.surface }]}>
+                {copy.conflictCopy}
+              </Animated.Text>
             ) : null}
             {/* Uncontrolled inputs: native views own the text, so typing costs no React render. */}
             <TextInput
@@ -118,7 +135,7 @@ export default function EntryScreen() {
             />
           </ScrollView>
           <FormatBar editorRef={editor.editorRef} state={formatState} focused={editor.focused} />
-        </KeyboardAvoidingView>
+        </AnimatedKeyboardAvoidingView>
       ) : null}
 
       <Sheet visible={sheet === 'menu'} onClose={() => setSheet('none')}>
@@ -165,7 +182,6 @@ const styles = StyleSheet.create({
     paddingVertical: space.s,
   },
   topActions: { flexDirection: 'row', alignItems: 'center', gap: space.l },
-  icon: { fontSize: 20 },
   page: { paddingHorizontal: space.l, paddingBottom: 160, maxWidth: 720, width: '100%', alignSelf: 'center', gap: space.s },
   banner: { padding: space.m, borderRadius: 10, marginBottom: space.s },
 });

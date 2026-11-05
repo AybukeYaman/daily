@@ -18,7 +18,12 @@
     "web": {
       "output": "single"
     },
-    "plugins": ["expo-router", "expo-sqlite", "expo-secure-store"],
+    "plugins": [
+      "expo-router",
+      "expo-sqlite",
+      "expo-secure-store",
+      "./plugins/with-gradle-memory"
+    ],
     "experiments": {
       "typedRoutes": false
     }
