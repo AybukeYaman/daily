@@ -1,0 +1,26 @@
+{
+  "expo": {
+    "name": "Daily",
+    "slug": "daily",
+    "scheme": "daily",
+    "version": "0.1.0",
+    "orientation": "default",
+    "userInterfaceStyle": "automatic",
+    "backgroundColor": "#FBF8F3",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "app.daily.journal"
+    },
+    "android": {
+      "package": "app.daily.journal",
+      "softwareKeyboardLayoutMode": "resize"
+    },
+    "web": {
+      "output": "single"
+    },
+    "plugins": ["expo-router", "expo-sqlite", "expo-secure-store"],
+    "experiments": {
+      "typedRoutes": false
+    }
+  }
+}

@@ -1,0 +1,5 @@
+node_modules/
+dist/
+apps/api/src/generated/
+graphify-out/
+apps/mobile/.expo/

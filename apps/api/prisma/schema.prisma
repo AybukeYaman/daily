@@ -1,0 +1,110 @@
+// Changes only through `prisma migrate dev`. No `db push`, no hand-written SQL.
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "esm"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @unique @db.VarChar(254)
+  passwordHash String   @map("password_hash")
+  /// Per-user monotonic change counter. Incremented on every entry write; drives pull cursors.
+  syncSeq      Int      @default(0) @map("sync_seq")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  refreshTokens  RefreshToken[]
+  entries        JournalEntry[]
+  versions       JournalVersion[]
+  syncOperations SyncOperation[]
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  /// All tokens produced by rotating one login share a family; reuse revokes the family.
+  familyId  String    @map("family_id") @db.Uuid
+  tokenHash String    @unique @map("token_hash") @db.Char(64)
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(3)
+  usedAt    DateTime? @map("used_at") @db.Timestamptz(3)
+  revokedAt DateTime? @map("revoked_at") @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([familyId])
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+model JournalEntry {
+  /// Generated on the device so entries can be created offline.
+  id         String    @id @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  title      String    @db.VarChar(300)
+  content    Json
+  /// Derived from content on write; used for previews and (Phase 3) full-text search.
+  plainText  String    @map("plain_text")
+  wordCount  Int       @map("word_count")
+  entryDate  DateTime  @map("entry_date") @db.Date
+  favorite   Boolean   @default(false)
+  archived   Boolean   @default(false)
+  conflictOf String?   @map("conflict_of") @db.Uuid
+  /// Optimistic concurrency: a write must name the revision it was based on.
+  revision   Int
+  syncSeq    Int       @map("sync_seq")
+  deletedAt  DateTime? @map("deleted_at") @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt  DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user     User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  versions JournalVersion[]
+
+  @@index([userId, syncSeq])
+  @@index([userId, entryDate(sort: Desc)])
+  @@map("journal_entries")
+}
+
+/// Immutable snapshot of an entry before each server-side change (version history + recovery).
+model JournalVersion {
+  id        String    @id @default(uuid()) @db.Uuid
+  entryId   String    @map("entry_id") @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  revision  Int
+  title     String    @db.VarChar(300)
+  content   Json
+  entryDate DateTime  @map("entry_date") @db.Date
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  entry JournalEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  user  User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([entryId, revision])
+  @@index([userId])
+  @@map("journal_versions")
+}
+
+/// Idempotency log: a retried opId returns the stored result instead of applying twice.
+model SyncOperation {
+  userId    String   @map("user_id") @db.Uuid
+  opId      String   @map("op_id") @db.Uuid
+  entryId   String   @map("entry_id") @db.Uuid
+  status    String   @db.VarChar(16)
+  result    Json
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, opId])
+  @@index([createdAt])
+  @@map("sync_operations")
+}

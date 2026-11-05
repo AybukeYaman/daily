@@ -1,0 +1,19 @@
+{
+  "name": "daily",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build:shared": "npm run build -w @daily/shared",
+    "typecheck": "npm run build:shared && npm run typecheck --workspaces --if-present",
+    "test": "npm run build:shared && npm run test --workspaces --if-present && npm run test:integration",
+    "test:integration": "vitest run --root tests",
+    "api": "npm run build -w @daily/api && npm start -w @daily/api",
+    "app": "npm start -w @daily/mobile"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

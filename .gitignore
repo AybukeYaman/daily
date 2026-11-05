@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.expo/
+*.log
+.env
+.env.*
+!.env.example
+ios/
+android/
+coverage/
+graphify-out/
+apps/api/src/generated/
