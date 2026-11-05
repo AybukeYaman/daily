@@ -15,7 +15,7 @@ Her faz açıkça açılır ve kapanır. Bir faz, "Definition of Done" sağlanma
 | 0 | Mimari, ADR'ler, API + senkron sözleşmesi, şema | ✅ Kapandı |
 | 1 | Monorepo, NestJS API (auth, yetki, hata, log), Prisma şeması, Expo temeli, tasarım sistemi, ilk testler | 🟡 Kod + testler tamam. Açık: ilk migration'ı senin makinede `prisma migrate dev --name init` ile üretmek (bulut ortamı Prisma engine'ini indiremedi) ve gerçek Postgres'e karşı repository entegrasyon testi |
 | 2 | Local-first kalıcılık: SQLite, outbox, autosave, senkron motoru, çakışma koruması, sürüm geçmişi (server) | 🟡 Çekirdek + 9 cihaz⇄sunucu senaryosu yeşil. Açık: gerçek iOS/Android cihazda arka plana alma / öldürme testi |
-| 3 | Günlük: zengin metin editörü, arşiv/favori, çöp kutusu + geri alma, arama (Postgres FTS), takvim, sürüm geçmişi UI | ⏳ |
+| 3 | Günlük: native zengin metin editörü, arşiv/favori, çöp kutusu + geri getirme, tarih değiştirme, cihazda FTS5 arama, aylık takvim, sürüm geçmişi (API + UI) | 🟡 Kod + 57 test yeşil, iOS/Android bundle temiz. Açık: gerçek cihazda yazma gecikmesi ölçümü (ADR 0003) |
 | 4 | El yazısı motoru — önce prototip + ölçüm, sonra entegrasyon | ⏳ |
 | 5 | Fotoğraf/video: S3 uyumlu depolama, multipart/resumable upload, küçük resim | ⏳ |
 | 6 | Native widget'lar (WidgetKit / Android App Widgets) | ⏳ |
@@ -46,6 +46,10 @@ Promptta var, ama çekirdek yazma deneyimini kanıtlamadan eklenmeyecek:
 - 8 widget yerine ilk sürümde 3: **Hızlı Yaz**, **Bugünün Ruh Hali**, **Günün Sorusu**
 - Web: Expo web hedefi çalışır kalır, ama öncelik iOS + Android
 
-## Sıradaki adım (Faz 3 açılışı)
+## Faz 3'te bilinçli olarak dışarıda kalanlar
 
-Editör kararı: TipTap/ProseMirror tabanlı (DOM component) vs. native `TextInput` + blok modeli. İkisi de gerçek cihazda yazma gecikmesiyle karşılaştırılacak; karar ADR olarak kaydedilecek.
+Etiketler, ayraç (separator — editör kütüphanesi desteklemiyor), yıllık takvim görünümü, son imleç konumunu hatırlama, odak modu. İhtiyaç kanıtlanırsa eklenir.
+
+## Sıradaki adım (Faz 4 açılışı)
+
+El yazısı motoru: önce izole bir prototip (Skia + Reanimated worklet, UI thread) ve gerçek iPad + Android tablette input-to-render ölçümü. Ölçüm hedefi karşılamazsa native modül. Entegrasyon (yazı içinde `handwriting` bloğu) ölçüm sonrası.

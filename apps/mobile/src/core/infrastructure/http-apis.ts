@@ -7,8 +7,12 @@ import {
   PushResponseSchema,
   type Session,
   SessionSchema,
+  type VersionDetail,
+  VersionDetailSchema,
+  VersionListSchema,
+  type VersionSummary,
 } from '@daily/shared';
-import { AuthExpiredError, type AuthApi, type SyncApi } from '../application/ports';
+import { AuthExpiredError, type AuthApi, type HistoryApi, type SyncApi } from '../application/ports';
 import { HttpError, type HttpClient } from './http-client';
 
 /** Responses are validated with the shared schemas: a bad server reply never reaches the local database. */
@@ -42,5 +46,18 @@ export class HttpSyncApi implements SyncApi {
   }
   async pull(since: number): Promise<PullResponse> {
     return PullResponseSchema.parse(await this.http.request('GET', `/sync/pull?since=${since}`));
+  }
+}
+
+export class HttpHistoryApi implements HistoryApi {
+  constructor(private readonly http: HttpClient) {}
+
+  async list(entryId: string): Promise<VersionSummary[]> {
+    return VersionListSchema.parse(await this.http.request('GET', `/entries/${encodeURIComponent(entryId)}/versions`)).versions;
+  }
+  async get(entryId: string, revision: number): Promise<VersionDetail> {
+    return VersionDetailSchema.parse(
+      await this.http.request('GET', `/entries/${encodeURIComponent(entryId)}/versions/${revision}`),
+    );
   }
 }

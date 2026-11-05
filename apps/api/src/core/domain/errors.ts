@@ -29,3 +29,7 @@ export class EmailTakenError extends DomainError {
 export class ConcurrentModificationError extends DomainError {
   readonly code = 'concurrent_modification';
 }
+
+export class NotFoundError extends DomainError {
+  readonly code = 'not_found';
+}

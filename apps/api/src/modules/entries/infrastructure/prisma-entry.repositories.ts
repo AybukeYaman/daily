@@ -1,9 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import type { EntryContent } from '@daily/shared';
-import type { JournalEntry, Prisma } from '../../../generated/prisma/client.js';
+import type { JournalEntry, JournalVersion, Prisma } from '../../../generated/prisma/client.js';
 import { PrismaService } from '../../../core/infrastructure/prisma.service.js';
 import type { EntryState } from '../domain/journal-entry.js';
-import { EntryRepository, EntryVersionRepository, type EntryWrite } from '../application/ports.js';
+import { EntryRepository, EntryVersionRepository, type EntryWrite, type VersionRecord } from '../application/ports.js';
 
 /** `@db.Date` columns travel as UTC midnight; the domain uses plain `YYYY-MM-DD`. */
 const toDbDate = (isoDate: string): Date => new Date(`${isoDate}T00:00:00.000Z`);
@@ -101,4 +101,48 @@ export class PrismaEntryVersionRepository extends EntryVersionRepository {
       },
     });
   }
+
+  async lastSnapshotAt(entryId: string): Promise<Date | null> {
+    const row = await this.prisma.db.journalVersion.findFirst({
+      where: { entryId },
+      orderBy: { revision: 'desc' }, // revision is monotonic; uses the (entry_id, revision) unique index
+      select: { createdAt: true },
+    });
+    return row?.createdAt ?? null;
+  }
+
+  async prune(entryId: string, keep: number): Promise<void> {
+    const boundary = await this.prisma.db.journalVersion.findFirst({
+      where: { entryId },
+      orderBy: { revision: 'desc' },
+      skip: keep - 1,
+      select: { revision: true },
+    });
+    if (boundary) await this.prisma.db.journalVersion.deleteMany({ where: { entryId, revision: { lt: boundary.revision } } });
+  }
+
+  async list(userId: string, entryId: string, limit: number): Promise<VersionRecord[]> {
+    const rows = await this.prisma.db.journalVersion.findMany({
+      where: { entryId, userId },
+      orderBy: { revision: 'desc' },
+      take: limit,
+    });
+    return rows.map(toVersion);
+  }
+
+  async get(userId: string, entryId: string, revision: number): Promise<VersionRecord | null> {
+    const row = await this.prisma.db.journalVersion.findFirst({ where: { entryId, userId, revision } });
+    return row ? toVersion(row) : null;
+  }
+}
+
+function toVersion(row: JournalVersion): VersionRecord {
+  return {
+    revision: row.revision,
+    title: row.title,
+    content: row.content as unknown as EntryContent,
+    entryDate: fromDbDate(row.entryDate),
+    deletedAt: row.deletedAt,
+    createdAt: row.createdAt,
+  };
 }

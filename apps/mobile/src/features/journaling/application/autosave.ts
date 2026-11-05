@@ -1,5 +1,3 @@
-import type { EntryData } from '@daily/shared';
-
 export type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 
 /**
@@ -9,18 +7,18 @@ export type SaveState = 'idle' | 'saving' | 'saved' | 'error';
  * - saves are chained, so they always land in order.
  * A failed write keeps the data pending and is retried on the next schedule/flush.
  */
-export class AutosaveController {
-  private pending: EntryData | null = null;
+export class AutosaveController<T> {
+  private pending: T | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private chain: Promise<void> = Promise.resolve();
 
   constructor(
-    private readonly persist: (data: EntryData) => Promise<void>,
+    private readonly persist: (data: T) => Promise<void>,
     private readonly onState: (state: SaveState) => void,
     private readonly delayMs = 250,
   ) {}
 
-  schedule(data: EntryData): void {
+  schedule(data: T): void {
     this.pending = data;
     this.onState('saving');
     if (this.timer) clearTimeout(this.timer);

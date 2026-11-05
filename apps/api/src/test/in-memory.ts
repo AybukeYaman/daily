@@ -10,7 +10,7 @@ import {
 } from '../modules/auth/application/ports.js';
 import { Clock, TransactionRunner } from '../core/application/ports.js';
 import type { EntryState } from '../modules/entries/domain/journal-entry.js';
-import { EntryRepository, EntryVersionRepository, type EntryWrite } from '../modules/entries/application/ports.js';
+import { EntryRepository, EntryVersionRepository, type EntryWrite, type VersionRecord } from '../modules/entries/application/ports.js';
 import { type StoredOutcome, SyncOperationLog, UserSyncSequence } from '../modules/sync/application/ports.js';
 
 export class FixedClock extends Clock {
@@ -62,9 +62,30 @@ export class MemoryEntries extends EntryRepository {
 }
 
 export class MemoryVersions extends EntryVersionRepository {
-  readonly snapshots: EntryState[] = [];
+  readonly snapshots: (EntryState & { snapshotAt: Date })[] = [];
+  constructor(private readonly clock: Clock = new FixedClock()) {
+    super();
+  }
   async snapshot(entry: EntryState) {
-    this.snapshots.push(structuredClone(entry));
+    this.snapshots.push({ ...structuredClone(entry), snapshotAt: this.clock.now() });
+  }
+  async lastSnapshotAt(entryId: string) {
+    return this.snapshots.filter((s) => s.id === entryId).at(-1)?.snapshotAt ?? null;
+  }
+  async prune(entryId: string, keep: number) {
+    const mine = this.snapshots.filter((s) => s.id === entryId);
+    const drop = new Set(mine.slice(0, Math.max(0, mine.length - keep)));
+    for (let i = this.snapshots.length - 1; i >= 0; i--) if (drop.has(this.snapshots[i]!)) this.snapshots.splice(i, 1);
+  }
+  async list(userId: string, entryId: string, limit: number): Promise<VersionRecord[]> {
+    return this.snapshots
+      .filter((s) => s.id === entryId && s.userId === userId)
+      .reverse()
+      .slice(0, limit)
+      .map((s) => ({ revision: s.revision, title: s.title, content: s.content, entryDate: s.entryDate, deletedAt: s.deletedAt, createdAt: s.snapshotAt }));
+  }
+  async get(userId: string, entryId: string, revision: number) {
+    return (await this.list(userId, entryId, Number.MAX_SAFE_INTEGER)).find((v) => v.revision === revision) ?? null;
   }
 }
 

@@ -9,6 +9,7 @@ interface OutboxRow {
   entry_id: string;
   payload: string | null;
   attempts: number;
+  checkpoint: number;
 }
 
 const CURSOR_KEY = 'sync.cursor';
@@ -41,7 +42,7 @@ export class SqliteSyncStore implements SyncStore {
     return this.db.transaction(async (tx) => {
       // Head of each entry's queue only: ops of one entry are strictly sequential.
       const heads = await tx.all<OutboxRow>(
-        `SELECT o.seq, o.op_id, o.entry_id, o.payload, o.attempts FROM outbox o
+        `SELECT o.seq, o.op_id, o.entry_id, o.payload, o.attempts, o.checkpoint FROM outbox o
          WHERE o.failed = 0 AND o.next_attempt_at <= ?
            AND o.seq = (SELECT MIN(seq) FROM outbox WHERE entry_id = o.entry_id)
          ORDER BY o.seq LIMIT ?`,
@@ -76,7 +77,14 @@ export class SqliteSyncStore implements SyncStore {
       if (entry.serverRevision === null) return null;
       return { kind: 'delete', opId: row.op_id, entryId: entry.id, baseRevision: entry.serverRevision };
     }
-    return { kind: 'upsert', opId: row.op_id, entryId: entry.id, baseRevision: entry.serverRevision, data: entryDataOf(entry) };
+    return {
+      kind: 'upsert',
+      opId: row.op_id,
+      entryId: entry.id,
+      baseRevision: entry.serverRevision,
+      data: entryDataOf(entry),
+      ...(row.checkpoint === 1 ? { checkpoint: true } : {}),
+    };
   }
 
   async scheduleRetry(opIds: string[], nowMs: number): Promise<void> {

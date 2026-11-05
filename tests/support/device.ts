@@ -1,11 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import type { OpResult, PullResponse, PushOp } from '@daily/shared';
-import { NetworkError, type SyncApi } from '../../apps/mobile/src/core/application/ports';
+import { type HistoryApi, NetworkError, type SyncApi } from '../../apps/mobile/src/core/application/ports';
 import { migrate } from '../../apps/mobile/src/core/infrastructure/sql/migrations';
 import { SqliteEntryStore } from '../../apps/mobile/src/core/infrastructure/sqlite-entry-store';
 import { SqliteSyncStore } from '../../apps/mobile/src/core/infrastructure/sqlite-sync-store';
+import { HistoryService } from '../../apps/mobile/src/features/journaling/application/history-service';
 import { JournalService } from '../../apps/mobile/src/features/journaling/application/journal-service';
 import { SyncEngine } from '../../apps/mobile/src/features/synchronization/application/sync-engine';
+import { GetEntryVersionUseCase, ListEntryVersionsUseCase } from '../../apps/api/src/modules/entries/application/version-history.use-cases';
 import { PullChangesUseCase } from '../../apps/api/src/modules/sync/application/pull-changes.use-case';
 import { PushChangesUseCase } from '../../apps/api/src/modules/sync/application/push-changes.use-case';
 import {
@@ -22,15 +24,26 @@ import { openNodeDatabase } from './node-sql-database';
 export class TestServer {
   readonly clock = new FixedClock();
   readonly entries = new MemoryEntries(this.clock);
+  readonly versions = new MemoryVersions(this.clock);
   private readonly push = new PushChangesUseCase(
     this.entries,
-    new MemoryVersions(),
+    this.versions,
     new MemoryOpLog(),
     new MemorySequence(),
     new DirectTransactionRunner(),
     this.clock,
   );
   private readonly pull = new PullChangesUseCase(this.entries);
+  private readonly listVersions = new ListEntryVersionsUseCase(this.versions);
+  private readonly getVersion = new GetEntryVersionUseCase(this.versions);
+
+  historyApi(userId: string): HistoryApi {
+    const wire = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
+    return {
+      list: async (entryId) => wire(await this.listVersions.execute(userId, entryId)),
+      get: async (entryId, revision) => wire(await this.getVersion.execute(userId, entryId, revision)),
+    };
+  }
 
   api(userId: string, net: { online: boolean; dropResponses?: boolean }): SyncApi {
     const wire = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
@@ -51,7 +64,7 @@ export class TestServer {
 
 export async function createDevice(server: TestServer, userId: string) {
   const db = openNodeDatabase();
-  await migrate(db);
+  const caps = await migrate(db);
   const ids = { uuid: () => randomUUID() };
   const clock = { now: () => new Date() };
   const net = { online: true, dropResponses: false };
@@ -64,7 +77,8 @@ export async function createDevice(server: TestServer, userId: string) {
     clock,
     () => true,
   );
-  const entries = new SqliteEntryStore(db, ids, clock);
+  const entries = new SqliteEntryStore(db, ids, clock, caps.fts5);
   const journal = new JournalService(entries, { kick: () => undefined }, clock);
-  return { db, net, engine, journal, entries, syncStore };
+  const history = new HistoryService(server.historyApi(userId), journal);
+  return { db, net, engine, journal, history, entries, syncStore };
 }

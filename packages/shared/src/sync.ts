@@ -11,6 +11,8 @@ export const PushOpSchema = z.discriminatedUnion('kind', [
     entryId: z.uuid(),
     baseRevision: z.number().int().positive().nullable(),
     data: EntryDataSchema,
+    /** Ask the server to snapshot the state being replaced (e.g. when restoring an old version). */
+    checkpoint: z.boolean().optional(),
   }),
   z.object({
     kind: z.literal('delete'),

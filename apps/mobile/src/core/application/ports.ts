@@ -1,4 +1,4 @@
-import type { Credentials, EntryData, EntryDto, OpResult, PullResponse, PushOp, Session } from '@daily/shared';
+import type { Credentials, EntryData, EntryDto, OpResult, PullResponse, PushOp, Session, VersionDetail, VersionSummary } from '@daily/shared';
 
 export interface LocalEntry extends EntryData {
   id: string;
@@ -31,13 +31,35 @@ export interface TimelinePage {
   next: TimelineCursor | null;
 }
 
+export interface TrashItem extends EntrySummary {
+  deletedAt: string;
+}
+
+export interface SearchQuery {
+  text: string;
+  favoritesOnly: boolean;
+  includeArchived: boolean;
+  limit: number;
+}
+
 /** Local journal persistence. Every write also marks the entry for sync, atomically. */
 export interface EntryStore {
   get(id: string): Promise<LocalEntry | null>;
   create(data: EntryData): Promise<string>;
-  save(id: string, data: EntryData): Promise<void>;
+  /** `checkpoint`: the server keeps the replaced state as a version (used by restore). */
+  save(id: string, data: EntryData, options?: { checkpoint?: boolean }): Promise<void>;
   softDelete(id: string): Promise<void>;
+  restore(id: string): Promise<void>;
+  /** Non-archived, non-deleted entries, newest day first. */
   timeline(limit: number, after?: TimelineCursor): Promise<TimelinePage>;
+  archived(limit: number, after?: TimelineCursor): Promise<TimelinePage>;
+  byDate(isoDate: string): Promise<EntrySummary[]>;
+  /** Entry count per day in [from, to] (inclusive ISO dates), archived excluded. */
+  dayCounts(fromIsoDate: string, toIsoDate: string): Promise<Record<string, number>>;
+  trash(limit: number): Promise<TrashItem[]>;
+  /** Hard-deletes trash older than `beforeIso` that has nothing left to sync. Returns how many. */
+  purgeTrash(beforeIso: string): Promise<number>;
+  search(query: SearchQuery): Promise<EntrySummary[]>;
 }
 
 /** Local side of the sync protocol (outbox + pull cursor). */
@@ -64,6 +86,12 @@ export class AuthExpiredError extends Error {
 export interface SyncApi {
   push(ops: PushOp[]): Promise<OpResult[]>;
   pull(since: number): Promise<PullResponse>;
+}
+
+/** Server-side version history (requires an account). */
+export interface HistoryApi {
+  list(entryId: string): Promise<VersionSummary[]>;
+  get(entryId: string, revision: number): Promise<VersionDetail>;
 }
 
 export interface AuthApi {

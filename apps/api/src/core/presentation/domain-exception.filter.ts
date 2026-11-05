@@ -4,6 +4,7 @@ import {
   ConcurrentModificationError,
   DomainError,
   EmailTakenError,
+  NotFoundError,
   UnauthorizedError,
   ValidationError,
 } from '../domain/errors.js';
@@ -11,6 +12,7 @@ import {
 function statusOf(error: DomainError): number {
   if (error instanceof ValidationError) return HttpStatus.BAD_REQUEST;
   if (error instanceof UnauthorizedError) return HttpStatus.UNAUTHORIZED;
+  if (error instanceof NotFoundError) return HttpStatus.NOT_FOUND;
   if (error instanceof EmailTakenError) return HttpStatus.CONFLICT;
   if (error instanceof ConcurrentModificationError) return HttpStatus.CONFLICT;
   return HttpStatus.UNPROCESSABLE_ENTITY;

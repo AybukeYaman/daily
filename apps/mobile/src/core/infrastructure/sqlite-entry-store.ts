@@ -5,8 +5,10 @@ import type {
   EntrySummary,
   IdGenerator,
   LocalEntry,
+  SearchQuery,
   TimelineCursor,
   TimelinePage,
+  TrashItem,
 } from '../application/ports';
 import type { SqlDatabase, SqlExecutor } from './sql/sql-database';
 
@@ -64,13 +66,16 @@ export function derivedColumns(data: EntryData) {
  * entry has never been attempted, it already covers this change (its payload
  * is read lazily at send time). Otherwise a new row is appended.
  */
-export async function markDirty(tx: SqlExecutor, entryId: string, ids: IdGenerator): Promise<void> {
-  const latest = await tx.get<{ attempts: number }>(
-    'SELECT attempts FROM outbox WHERE entry_id = ? ORDER BY seq DESC LIMIT 1',
+export async function markDirty(tx: SqlExecutor, entryId: string, ids: IdGenerator, checkpoint = false): Promise<void> {
+  const latest = await tx.get<{ seq: number; attempts: number }>(
+    'SELECT seq, attempts FROM outbox WHERE entry_id = ? ORDER BY seq DESC LIMIT 1',
     [entryId],
   );
-  if (latest && latest.attempts === 0) return;
-  await tx.run('INSERT INTO outbox (op_id, entry_id) VALUES (?, ?)', [ids.uuid(), entryId]);
+  if (latest && latest.attempts === 0) {
+    if (checkpoint) await tx.run('UPDATE outbox SET checkpoint = 1 WHERE seq = ?', [latest.seq]);
+    return;
+  }
+  await tx.run('INSERT INTO outbox (op_id, entry_id, checkpoint) VALUES (?, ?, ?)', [ids.uuid(), entryId, checkpoint ? 1 : 0]);
 }
 
 export async function insertEntry(tx: SqlExecutor, id: string, data: EntryData, nowIso: string): Promise<void> {
@@ -84,7 +89,9 @@ export async function insertEntry(tx: SqlExecutor, id: string, data: EntryData, 
   );
 }
 
-const SUMMARY_COLUMNS = 'id, title, preview, entry_date, created_at, word_count, favorite, conflict_of';
+const SUMMARY_COLUMNS =
+  'e.id, e.title, e.preview, e.entry_date, e.created_at, e.word_count, e.favorite, e.conflict_of';
+const TIMELINE_ORDER = 'ORDER BY e.entry_date DESC, e.created_at DESC, e.id DESC';
 
 interface SummaryRow {
   id: string;
@@ -97,11 +104,41 @@ interface SummaryRow {
   conflict_of: string | null;
 }
 
+function toSummary(r: SummaryRow): EntrySummary {
+  return {
+    id: r.id,
+    title: r.title,
+    preview: r.preview,
+    entryDate: r.entry_date,
+    wordCount: r.word_count,
+    favorite: r.favorite === 1,
+    isConflictCopy: r.conflict_of !== null,
+  };
+}
+
+/**
+ * User text → FTS5 query: every word must match as a prefix ("gün" finds "günlük").
+ * Operators and quotes are stripped, so input can never break or widen the query.
+ */
+export function toFtsQuery(input: string): string | null {
+  const tokens = input
+    .normalize('NFC')
+    .replace(/["*^():{}[\]+\-.,;!?/\\]/g, ' ') // operators/punctuation separate words, like the tokenizer does
+    .split(/\s+/)
+    .filter((t) => t.length > 0)
+    .slice(0, 8);
+  return tokens.length > 0 ? tokens.map((t) => `"${t}"*`).join(' ') : null;
+}
+
+const escapeLike = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
+
 export class SqliteEntryStore implements EntryStore {
   constructor(
     private readonly db: SqlDatabase,
     private readonly ids: IdGenerator,
     private readonly clock: Clock,
+    /** False on web builds without FTS5: search falls back to LIKE. */
+    private readonly fullTextSearch: boolean,
   ) {}
 
   async get(id: string): Promise<LocalEntry | null> {
@@ -118,7 +155,7 @@ export class SqliteEntryStore implements EntryStore {
     return id;
   }
 
-  async save(id: string, data: EntryData): Promise<void> {
+  async save(id: string, data: EntryData, options: { checkpoint?: boolean } = {}): Promise<void> {
     const d = derivedColumns(data);
     await this.db.transaction(async (tx) => {
       const { changes } = await tx.run(
@@ -129,51 +166,128 @@ export class SqliteEntryStore implements EntryStore {
       );
       // Never drop a write: if the row vanished (e.g. replaced by a sync), recreate it.
       if (changes === 0) await insertEntry(tx, id, data, this.clock.now().toISOString());
-      await markDirty(tx, id, this.ids);
+      await markDirty(tx, id, this.ids, options.checkpoint);
     });
   }
 
   async softDelete(id: string): Promise<void> {
+    await this.setDeleted(id, this.clock.now().toISOString());
+  }
+
+  async restore(id: string): Promise<void> {
+    await this.setDeleted(id, null);
+  }
+
+  private async setDeleted(id: string, deletedAt: string | null): Promise<void> {
     await this.db.transaction(async (tx) => {
-      const now = this.clock.now().toISOString();
       const { changes } = await tx.run(
-        'UPDATE entries SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL',
-        [now, now, id],
+        `UPDATE entries SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS ${deletedAt ? 'NULL' : 'NOT NULL'}`,
+        [deletedAt, this.clock.now().toISOString(), id],
       );
       if (changes > 0) await markDirty(tx, id, this.ids);
     });
   }
 
-  /** Keyset pagination on the partial timeline index: cost is O(limit), independent of archive size. */
-  async timeline(limit: number, after?: TimelineCursor): Promise<TimelinePage> {
+  timeline(limit: number, after?: TimelineCursor): Promise<TimelinePage> {
+    return this.page('e.deleted_at IS NULL AND e.archived = 0', limit, after);
+  }
+
+  archived(limit: number, after?: TimelineCursor): Promise<TimelinePage> {
+    return this.page('e.deleted_at IS NULL AND e.archived = 1', limit, after);
+  }
+
+  /** Keyset pagination on a partial index: cost is O(limit), independent of archive size. */
+  private async page(where: string, limit: number, after?: TimelineCursor): Promise<TimelinePage> {
     const rows = after
       ? await this.db.all<SummaryRow>(
-          `SELECT ${SUMMARY_COLUMNS} FROM entries
-           WHERE deleted_at IS NULL AND (entry_date, created_at, id) < (?, ?, ?)
-           ORDER BY entry_date DESC, created_at DESC, id DESC LIMIT ?`,
+          `SELECT ${SUMMARY_COLUMNS} FROM entries e
+           WHERE ${where} AND (e.entry_date, e.created_at, e.id) < (?, ?, ?) ${TIMELINE_ORDER} LIMIT ?`,
           [after.entryDate, after.createdAt, after.id, limit + 1],
         )
-      : await this.db.all<SummaryRow>(
-          `SELECT ${SUMMARY_COLUMNS} FROM entries WHERE deleted_at IS NULL
-           ORDER BY entry_date DESC, created_at DESC, id DESC LIMIT ?`,
-          [limit + 1],
-        );
+      : await this.db.all<SummaryRow>(`SELECT ${SUMMARY_COLUMNS} FROM entries e WHERE ${where} ${TIMELINE_ORDER} LIMIT ?`, [
+          limit + 1,
+        ]);
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;
     const last = page[page.length - 1];
     return {
-      items: page.map(
-        (r): EntrySummary => ({
-          id: r.id,
-          title: r.title,
-          preview: r.preview,
-          entryDate: r.entry_date,
-          wordCount: r.word_count,
-          favorite: r.favorite === 1,
-          isConflictCopy: r.conflict_of !== null,
-        }),
-      ),
+      items: page.map(toSummary),
       next: hasMore && last ? { entryDate: last.entry_date, createdAt: last.created_at, id: last.id } : null,
     };
+  }
+
+  async byDate(isoDate: string): Promise<EntrySummary[]> {
+    const rows = await this.db.all<SummaryRow>(
+      `SELECT ${SUMMARY_COLUMNS} FROM entries e WHERE e.deleted_at IS NULL AND e.archived = 0 AND e.entry_date = ? ${TIMELINE_ORDER}`,
+      [isoDate],
+    );
+    return rows.map(toSummary);
+  }
+
+  async dayCounts(fromIsoDate: string, toIsoDate: string): Promise<Record<string, number>> {
+    const rows = await this.db.all<{ entry_date: string; n: number }>(
+      `SELECT entry_date, COUNT(*) AS n FROM entries
+       WHERE deleted_at IS NULL AND archived = 0 AND entry_date BETWEEN ? AND ? GROUP BY entry_date`,
+      [fromIsoDate, toIsoDate],
+    );
+    const out: Record<string, number> = {};
+    for (const r of rows) out[r.entry_date] = r.n;
+    return out;
+  }
+
+  async trash(limit: number): Promise<TrashItem[]> {
+    const rows = await this.db.all<SummaryRow & { deleted_at: string }>(
+      `SELECT ${SUMMARY_COLUMNS}, e.deleted_at FROM entries e WHERE e.deleted_at IS NOT NULL ORDER BY e.deleted_at DESC LIMIT ?`,
+      [limit],
+    );
+    return rows.map((r) => ({ ...toSummary(r), deletedAt: r.deleted_at }));
+  }
+
+  async purgeTrash(beforeIso: string): Promise<number> {
+    return this.db.transaction(async (tx) => {
+      const { changes } = await tx.run(
+        `DELETE FROM entries WHERE deleted_at IS NOT NULL AND deleted_at < ?
+           AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.entry_id = entries.id)`,
+        [beforeIso],
+      );
+      return changes;
+    });
+  }
+
+  async search(q: SearchQuery): Promise<EntrySummary[]> {
+    const filters = ['e.deleted_at IS NULL'];
+    if (!q.includeArchived) filters.push('e.archived = 0');
+    if (q.favoritesOnly) filters.push('e.favorite = 1');
+    const text = q.text.trim();
+
+    if (text.length === 0) {
+      // Filters alone (e.g. "favorites"): newest first.
+      const rows = await this.db.all<SummaryRow>(
+        `SELECT ${SUMMARY_COLUMNS} FROM entries e WHERE ${filters.join(' AND ')} ${TIMELINE_ORDER} LIMIT ?`,
+        [q.limit],
+      );
+      return rows.map(toSummary);
+    }
+
+    if (this.fullTextSearch) {
+      const match = toFtsQuery(text);
+      if (!match) return [];
+      const rows = await this.db.all<SummaryRow>(
+        `SELECT ${SUMMARY_COLUMNS} FROM entries_fts f JOIN entries e ON e.rowid = f.rowid
+         WHERE entries_fts MATCH ? AND ${filters.join(' AND ')}
+         ORDER BY bm25(entries_fts, 4.0, 1.0), e.entry_date DESC LIMIT ?`,
+        [match, q.limit],
+      );
+      return rows.map(toSummary);
+    }
+
+    const like = `%${escapeLike(text)}%`;
+    const rows = await this.db.all<SummaryRow>(
+      `SELECT ${SUMMARY_COLUMNS} FROM entries e
+       WHERE ${filters.join(' AND ')} AND (e.title LIKE ? ESCAPE '\\' OR e.plain_text LIKE ? ESCAPE '\\')
+       ${TIMELINE_ORDER} LIMIT ?`,
+      [like, like, q.limit],
+    );
+    return rows.map(toSummary);
   }
 }

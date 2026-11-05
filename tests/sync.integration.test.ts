@@ -141,6 +141,26 @@ describe('device ⇄ server sync (real SQLite + real server use cases)', () => {
     expect(await a.syncStore.counts()).toEqual({ pending: 0, failed: 0 });
   });
 
+  it('restoring an old version is a new revision; the replaced text stays in history', async () => {
+    const server = new TestServer();
+    const a = await device(server);
+    const id = (await a.journal.save(null, text('my first thoughts')))!;
+    await a.engine.syncNow();
+    server.clock.advance(11 * 60_000);
+    await a.journal.save(id, text('accidentally overwritten'));
+    await a.engine.syncNow();
+
+    const [old] = await a.history.list(id);
+    expect(old).toMatchObject({ revision: 1, preview: 'my first thoughts' });
+    await a.history.restore(id, await a.history.get(id, old!.revision));
+    await a.engine.syncNow();
+
+    expect(server.entries.rows.get(id)).toMatchObject({ revision: 3, plainText: 'my first thoughts' });
+    // Restored within the 10-minute window, yet the replaced text is still recoverable.
+    expect((await a.history.list(id)).map((v) => v.preview)).toEqual(['accidentally overwritten', 'my first thoughts']);
+    expect(await bodies(a)).toEqual(['my first thoughts']);
+  });
+
   it('empty drafts are never created', async () => {
     const server = new TestServer();
     const a = await device(server);

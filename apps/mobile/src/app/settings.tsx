@@ -44,7 +44,12 @@ export default function Settings() {
         <PressableText label={`‹ ${copy.back}`} onPress={() => router.back()} />
       </View>
       <ScrollView contentContainerStyle={styles.page} keyboardShouldPersistTaps="handled">
-        <Text style={[type.overline, { color: t.muted }]}>{copy.account.section}</Text>
+        <View style={[styles.group, styles.links]}>
+          <PressableText label={copy.archiveTitle} onPress={() => router.push('/archive')} />
+          <PressableText label={copy.trashTitle} onPress={() => router.push('/trash')} />
+        </View>
+
+        <Text style={[type.overline, { color: t.muted, marginTop: space.xl }]}>{copy.account.section}</Text>
         {signedIn ? (
           <View style={styles.group}>
             <Text style={[type.ui, { color: t.text }]}>{copy.account.signedIn}</Text>
@@ -107,4 +112,5 @@ const styles = StyleSheet.create({
   group: { gap: space.m, marginTop: space.m },
   input: { paddingVertical: space.s, borderBottomWidth: StyleSheet.hairlineWidth },
   actions: { flexDirection: 'row', gap: space.l, marginTop: space.s },
+  links: { marginTop: 0 },
 });

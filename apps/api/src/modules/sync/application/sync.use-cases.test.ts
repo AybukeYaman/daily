@@ -42,7 +42,7 @@ describe('sync use cases', () => {
   beforeEach(() => {
     clock = new FixedClock();
     entries = new MemoryEntries(clock);
-    versions = new MemoryVersions();
+    versions = new MemoryVersions(clock);
     push = new PushChangesUseCase(entries, versions, new MemoryOpLog(), new MemorySequence(), new DirectTransactionRunner(), clock);
     pull = new PullChangesUseCase(entries);
   });
@@ -93,6 +93,20 @@ describe('sync use cases', () => {
 
     await push.execute(ALICE, [upsert(2, 'keep me')]);
     expect(entries.rows.get(ENTRY)?.deletedAt).toBeNull();
+  });
+
+  it('keeps one snapshot per 10-minute window while typing, always on delete', async () => {
+    await push.execute(ALICE, [upsert(null, 'v1')]);
+    for (let rev = 1; rev <= 5; rev++) {
+      clock.advance(5_000); // a sync every few seconds while writing
+      await push.execute(ALICE, [upsert(rev, `v${rev + 1}`)]);
+    }
+    expect(versions.snapshots.map((s) => s.plainText)).toEqual(['v1']);
+
+    clock.advance(10 * 60_000);
+    await push.execute(ALICE, [upsert(6, 'v7')]);
+    await push.execute(ALICE, [{ kind: 'delete', opId: crypto.randomUUID(), entryId: ENTRY, baseRevision: 7 }]);
+    expect(versions.snapshots.map((s) => s.plainText)).toEqual(['v1', 'v6', 'v7']);
   });
 
   it('pulls changes by cursor in pages, including tombstones', async () => {

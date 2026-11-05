@@ -18,7 +18,7 @@ describe('AutosaveController', () => {
   it('coalesces typing into one write after the delay', async () => {
     const saved: string[] = [];
     const states: SaveState[] = [];
-    const c = new AutosaveController(async (x) => void saved.push(JSON.stringify(x.content)), (s) => states.push(s), 250);
+    const c = new AutosaveController<EntryData>(async (x) => void saved.push(JSON.stringify(x.content)), (s) => states.push(s), 250);
     c.schedule(d('a'));
     c.schedule(d('ab'));
     c.schedule(d('abc'));
@@ -29,7 +29,7 @@ describe('AutosaveController', () => {
 
   it('flush writes immediately (backgrounding, leaving the screen)', async () => {
     const persist = vi.fn(async () => undefined);
-    const c = new AutosaveController(persist, () => undefined, 10_000);
+    const c = new AutosaveController<EntryData>(persist, () => undefined, 10_000);
     c.schedule(d('now'));
     await c.flush();
     expect(persist).toHaveBeenCalledTimes(1);
@@ -42,7 +42,7 @@ describe('AutosaveController', () => {
       if (fail) throw new Error('disk full');
     });
     const states: SaveState[] = [];
-    const c = new AutosaveController(persist, (s) => states.push(s), 250);
+    const c = new AutosaveController<EntryData>(persist, (s) => states.push(s), 250);
     c.schedule(d('precious'));
     await c.flush();
     expect(states.at(-1)).toBe('error');
@@ -58,7 +58,7 @@ describe('AutosaveController', () => {
     const written: string[] = [];
     let active = 0;
     let maxActive = 0;
-    const c = new AutosaveController(
+    const c = new AutosaveController<EntryData>(
       async (x) => {
         maxActive = Math.max(maxActive, ++active);
         await new Promise((r) => setTimeout(r, 20));

@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
   backoffMs,
+  contentFromRich,
   contentFromText,
+  editorHtmlOf,
+  textToHtml,
   countWords,
   CredentialsSchema,
   PushRequestSchema,
   resolveConflict,
+  shouldSnapshot,
   toPlainText,
   type EntryDto,
 } from './index';
@@ -31,6 +35,16 @@ describe('content', () => {
     expect(countWords('Bugün çok güzel bir gün — değil mi?')).toBe(7);
     expect(countWords('   ')).toBe(0);
     expect(countWords("it's well-known")).toBe(2);
+  });
+
+  it('rich blocks contribute their plain text', () => {
+    expect(toPlainText(contentFromRich('<html><p><b>Hi</b></p></html>', 'Hi'))).toBe('Hi');
+  });
+
+  it('escapes text when converting to editor html', () => {
+    expect(textToHtml('a <b> & "c"\n\nd')).toBe('<html><p>a &lt;b&gt; &amp; &quot;c&quot;</p><br><p>d</p></html>');
+    expect(editorHtmlOf(contentFromText('x'))).toBe('<html><p>x</p></html>');
+    expect(editorHtmlOf(contentFromRich('<html><p>y</p></html>', 'y'))).toBe('<html><p>y</p></html>');
   });
 
   it('extracts plain text from blocks', () => {
@@ -67,6 +81,16 @@ describe('backoff', () => {
     expect(backoffMs(0, () => 0)).toBe(500);
     expect(backoffMs(3, () => 0.999999)).toBeLessThanOrEqual(8000);
     expect(backoffMs(50, () => 0.999999)).toBeLessThanOrEqual(300_000);
+  });
+});
+
+describe('version snapshots', () => {
+  const t0 = new Date('2026-11-05T10:00:00Z');
+  it('snapshots first change, deletes, and after the window', () => {
+    expect(shouldSnapshot(null, t0, false)).toBe(true);
+    expect(shouldSnapshot(t0, new Date('2026-11-05T10:05:00Z'), false)).toBe(false);
+    expect(shouldSnapshot(t0, new Date('2026-11-05T10:05:00Z'), true)).toBe(true);
+    expect(shouldSnapshot(t0, new Date('2026-11-05T10:10:00Z'), false)).toBe(true);
   });
 });
 

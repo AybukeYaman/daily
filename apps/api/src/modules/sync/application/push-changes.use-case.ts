@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import type { OpResult, PushOp } from '@daily/shared';
+import { MAX_VERSIONS_PER_ENTRY, type OpResult, type PushOp, shouldSnapshot } from '@daily/shared';
 import { Clock, TransactionRunner } from '../../../core/application/ports.js';
 import { ConcurrentModificationError } from '../../../core/domain/errors.js';
 import { decideWrite, derivedFields, type EntryState } from '../../entries/domain/journal-entry.js';
@@ -63,12 +63,18 @@ export class PushChangesUseCase {
 
     if (!current) throw new Error('Invariant violated: update/delete without current entry');
     const revision = current.revision + 1;
+    const now = this.clock.now();
     const changes =
       op.kind === 'upsert'
         ? { ...op.data, ...derivedFields(op.data), deletedAt: null } // an upsert onto a tombstone restores it
-        : { deletedAt: this.clock.now() };
+        : { deletedAt: now };
 
-    await this.versions.snapshot(current);
+    // Bounded history: one snapshot per window while typing, always on delete/restore, newest N kept.
+    const forced = op.kind === 'delete' || op.checkpoint === true;
+    if (shouldSnapshot(await this.versions.lastSnapshotAt(current.id), now, forced)) {
+      await this.versions.snapshot(current);
+      await this.versions.prune(current.id, MAX_VERSIONS_PER_ENTRY);
+    }
     const saved = await this.entries.update({ ...current, ...changes, revision, syncSeq }, current.revision);
     if (!saved) throw new ConcurrentModificationError('Entry changed during write');
     return { status: 'applied', revision, syncSeq };

@@ -41,10 +41,12 @@ npm test
 - `packages/shared` — content, conflict policy, backoff, contracts
 - `apps/api` — auth (rotation, reuse detection, expiry) and sync use cases (revision checks, idempotency, IDOR, tombstones, paging)
 - `apps/mobile` — autosave (coalescing, flush, failure retry, ordering)
-- `tests/` — **device ⇄ server**: the app's real SQLite stores and sync engine (better-sqlite3) against the server's real use cases: offline write, lost responses, two-device conflicts, delete-vs-edit, backoff, large archive paging.
+- `tests/` — **device ⇄ server**: the app's real SQLite stores and sync engine (better-sqlite3) against the server's real use cases: offline write, lost responses, two-device conflicts, delete-vs-edit, backoff, large archive paging, version restore; plus local search (FTS5 and LIKE fallback), trash/purge, archive and calendar queries.
 
 ## What is real today vs. planned
 
-Implemented: local-first writing with autosave, timeline, delete, accounts with refresh-token rotation, idempotent sync with lossless conflict copies, server version history (snapshots, no UI yet).
+Implemented: local-first writing with autosave, native rich text (bold, italic, underline, heading, lists, quote, auto-links), favorites, archive, trash with restore, custom entry dates, on-device full-text search, monthly calendar, version history with restore, accounts with refresh-token rotation, idempotent sync with lossless conflict copies.
 
-Not yet (see ROADMAP): rich text, search, calendar, handwriting, media, widgets, moods, app lock, local encryption (SQLCipher), export. App lock is not encryption; neither exists yet.
+Not yet (see ROADMAP): handwriting, media, widgets, moods, app lock, local encryption (SQLCipher), export. App lock is not encryption; neither exists yet.
+
+The editor (`react-native-enriched-html`) is a native module: run the app as a development build (`npx expo run:ios` / `npx expo run:android`), not in Expo Go.
