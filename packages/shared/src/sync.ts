@@ -2,6 +2,8 @@ import { z } from 'zod';
 import { EntryDataSchema, EntryDtoSchema, isSameEntryData, type EntryData, type EntryDto } from './entry';
 
 export const MAX_PUSH_OPS = 50;
+/** Devices stop adding ops to a push once its payload passes this size (server accepts 16 MB). */
+export const MAX_PUSH_BYTES = 4 * 1024 * 1024;
 const MAX_PULL_LIMIT = 200;
 
 export const PushOpSchema = z.discriminatedUnion('kind', [

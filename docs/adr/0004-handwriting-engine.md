@@ -16,7 +16,14 @@ Status: accepted for prototyping (Phase 4a). Release gated on device measurement
 - Eraser: uniform-grid spatial index + exact segment distance; ~0.01–0.07 ms per eraser move over 5 000 strokes (Node).
 - Undo/redo stores stroke references, never copies of samples; history capped at 200 commands.
 
-## Known gaps (Phase 4b+)
+## Integration (Phase 4b)
+- An entry's content is `[typed block, ...handwriting pages]`. Each page is a `handwriting` block: base64url strokes, page width/height in document px, background (blank/lined/grid).
+- Text editor and page screen write different blocks through a transactional read-modify-write (`EntryStore.update`), so neither can overwrite the other.
+- Pages save ~400 ms after each change and immediately on leave/background; an empty page is removed; an entry left with no words and no ink is discarded.
+- Viewport: one finger draws; two fingers pinch (1–4×) and pan; with "finger scroll" on, a finger scrolls and only the stylus draws. A stroke interrupted by a second finger is discarded.
+- Pages render on paper colour with fixed ink colours in both themes. Page width is stored, so a phone page opens at the same proportions on a tablet.
+- Sync: a device push is capped at 4 MB of payload (server accepts 16 MB), so large pages travel in separate requests.
+
+## Known gaps (Phase 4c+)
 - Live pressure rendering: the live stroke is constant-width; pressure strokes are filled outlines once committed. On iPad this must be validated (visual change at lift).
-- Zoom/pan, pages and backgrounds, persistence into entries (`handwriting` content block), app-background recovery of an in-progress page.
 - If measured latency misses the budget, the fallback is a native drawing view (Android `SurfaceView` / iOS `PencilKit`) behind the same `HandwritingSession` data model.

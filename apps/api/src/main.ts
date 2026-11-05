@@ -6,11 +6,12 @@ import { AppModule } from './app.module.js';
 import { AppConfig } from './core/infrastructure/config.js';
 
 async function bootstrap(): Promise<void> {
-  // Built-in body parser is replaced so the limit fits long entries (content is capped by zod as well).
+  // Built-in body parser is replaced so the limit fits large entries (content is capped by zod as well).
   const app = await NestFactory.create<NestExpressApplication>(AppModule, { bodyParser: false });
   const config = app.get(AppConfig);
 
-  app.useBodyParser('json', { limit: '5mb' });
+  // Handwriting pages can be a few MB; the device caps each push batch well below this (see SYNC.md).
+  app.useBodyParser('json', { limit: '16mb' });
   app.disable('x-powered-by');
   app.setGlobalPrefix('v1');
   app.enableShutdownHooks();

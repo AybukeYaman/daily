@@ -22,7 +22,27 @@ export const RichBlockSchema = z.object({
   text: z.string().max(200_000),
 });
 
-export const BlockSchema = z.discriminatedUnion('type', [TextBlockSchema, RichBlockSchema]);
+export const PAGE_BACKGROUNDS = ['blank', 'lined', 'grid'] as const;
+export type PageBackground = (typeof PAGE_BACKGROUNDS)[number];
+
+/**
+ * A handwriting page. `strokes` is the compact binary stroke format (see
+ * handwriting/codec) as base64url. `width` is the page width in document
+ * pixels when it was created, so it renders at the same proportions on any
+ * screen. `text` stays empty until recognition exists; it keeps the
+ * "every block has plain text" rule simple for search and previews.
+ */
+const HandwritingBlockSchema = z.object({
+  id: z.string().min(1).max(64),
+  type: z.literal('handwriting'),
+  strokes: z.string().max(3_000_000),
+  width: z.number().positive().max(10_000),
+  height: z.number().positive().max(100_000),
+  background: z.enum(PAGE_BACKGROUNDS),
+  text: z.literal(''),
+});
+
+export const BlockSchema = z.discriminatedUnion('type', [TextBlockSchema, RichBlockSchema, HandwritingBlockSchema]);
 
 export const EntryContentSchema = z.object({
   v: z.literal(1),
@@ -30,15 +50,13 @@ export const EntryContentSchema = z.object({
 });
 
 export type EntryContent = z.infer<typeof EntryContentSchema>;
+type Block = z.infer<typeof BlockSchema>;
+export type HandwritingBlock = z.infer<typeof HandwritingBlockSchema>;
 
 const MAIN_BLOCK_ID = 'main';
 
 export function contentFromText(text: string): EntryContent {
   return { v: 1, blocks: [{ id: MAIN_BLOCK_ID, type: 'text', text }] };
-}
-
-export function contentFromRich(html: string, text: string): EntryContent {
-  return { v: 1, blocks: [{ id: MAIN_BLOCK_ID, type: 'rich', html, text }] };
 }
 
 /** Plain text of all blocks, joined by blank lines. Used for search, previews and word count. */
@@ -62,11 +80,45 @@ export function textToHtml(text: string): string {
   return `<html>${paragraphs.join('')}</html>`;
 }
 
-/** HTML the editor should open with, for any stored content version. */
+const isTextual = (b: Block) => b.type === 'text' || b.type === 'rich';
+
+/** HTML the editor should open with: the typed part of the entry, for any stored version. */
 export function editorHtmlOf(content: EntryContent): string {
-  const blocks = content.blocks;
-  if (blocks.length === 1 && blocks[0]!.type === 'rich') return blocks[0]!.html;
-  return textToHtml(toPlainText(content));
+  const typed = content.blocks.filter(isTextual);
+  if (typed.length === 1 && typed[0]!.type === 'rich') return typed[0]!.html;
+  return textToHtml(toPlainText({ v: 1, blocks: typed }));
+}
+
+export function handwritingBlocksOf(content: EntryContent): HandwritingBlock[] {
+  return content.blocks.filter((b): b is HandwritingBlock => b.type === 'handwriting');
+}
+
+/**
+ * Replaces the typed part of an entry, keeping every other block (handwriting,
+ * later media) exactly as stored. The typed block always comes first.
+ */
+export function withTypedContent(content: EntryContent, html: string, text: string): EntryContent {
+  const others = content.blocks.filter((b) => !isTextual(b));
+  return { v: 1, blocks: [{ id: MAIN_BLOCK_ID, type: 'rich', html, text }, ...others] };
+}
+
+/** Inserts or replaces one block by id, preserving order. */
+export function withBlock(content: EntryContent, block: Block): EntryContent {
+  const i = content.blocks.findIndex((b) => b.id === block.id);
+  const blocks = content.blocks.slice();
+  if (i >= 0) blocks[i] = block;
+  else blocks.push(block);
+  return { v: 1, blocks };
+}
+
+export function withoutBlock(content: EntryContent, id: string): EntryContent {
+  return { v: 1, blocks: content.blocks.filter((b) => b.id !== id) };
+}
+
+/** True when the entry has nothing worth keeping (no words, no ink). */
+export function isEmptyContent(title: string, content: EntryContent): boolean {
+  if (title.trim() !== '') return false;
+  return content.blocks.every((b) => (b.type === 'handwriting' ? b.strokes.length === 0 : b.text.trim() === ''));
 }
 
 const WORD_CHAR = /[\p{L}\p{N}'’-]/u;

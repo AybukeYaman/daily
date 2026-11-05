@@ -1,4 +1,4 @@
-import { countWords, type EntryContent, type EntryData, previewOf, toPlainText } from '@daily/shared';
+import { countWords, type EntryContent, type EntryData, isEmptyContent, previewOf, toPlainText } from '@daily/shared';
 import type {
   Clock,
   EntryStore,
@@ -156,17 +156,46 @@ export class SqliteEntryStore implements EntryStore {
   }
 
   async save(id: string, data: EntryData, options: { checkpoint?: boolean } = {}): Promise<void> {
+    await this.db.transaction((tx) => this.write(tx, id, data, options.checkpoint ?? false));
+  }
+
+  async update(id: string, change: (current: EntryData) => EntryData, options: { checkpoint?: boolean } = {}): Promise<boolean> {
+    return this.db.transaction(async (tx) => {
+      const row = await tx.get<EntryRow>('SELECT * FROM entries WHERE id = ?', [id]);
+      if (!row) return false;
+      await this.write(tx, id, change(entryDataOf(rowToEntry(row))), options.checkpoint ?? false);
+      return true;
+    });
+  }
+
+  private async write(tx: SqlExecutor, id: string, data: EntryData, checkpoint: boolean): Promise<void> {
     const d = derivedColumns(data);
+    const { changes } = await tx.run(
+      `UPDATE entries SET title = ?, content = ?, plain_text = ?, preview = ?, word_count = ?, entry_date = ?,
+         favorite = ?, archived = ?, deleted_at = NULL, updated_at = ? WHERE id = ?`,
+      [data.title, JSON.stringify(data.content), d.plainText, d.preview, d.wordCount, data.entryDate,
+        data.favorite ? 1 : 0, data.archived ? 1 : 0, this.clock.now().toISOString(), id],
+    );
+    // Never drop a write: if the row vanished (e.g. replaced by a sync), recreate it.
+    if (changes === 0) await insertEntry(tx, id, data, this.clock.now().toISOString());
+    await markDirty(tx, id, this.ids, checkpoint);
+  }
+
+  async discardIfEmpty(id: string): Promise<void> {
     await this.db.transaction(async (tx) => {
-      const { changes } = await tx.run(
-        `UPDATE entries SET title = ?, content = ?, plain_text = ?, preview = ?, word_count = ?, entry_date = ?,
-           favorite = ?, archived = ?, deleted_at = NULL, updated_at = ? WHERE id = ?`,
-        [data.title, JSON.stringify(data.content), d.plainText, d.preview, d.wordCount, data.entryDate,
-          data.favorite ? 1 : 0, data.archived ? 1 : 0, this.clock.now().toISOString(), id],
-      );
-      // Never drop a write: if the row vanished (e.g. replaced by a sync), recreate it.
-      if (changes === 0) await insertEntry(tx, id, data, this.clock.now().toISOString());
-      await markDirty(tx, id, this.ids, options.checkpoint);
+      const row = await tx.get<EntryRow>('SELECT * FROM entries WHERE id = ?', [id]);
+      if (!row || row.deleted_at) return;
+      const entry = rowToEntry(row);
+      if (!isEmptyContent(entry.title, entry.content)) return;
+      if (entry.serverRevision === null) {
+        // The server never saw it: remove it and anything queued for it.
+        await tx.run('DELETE FROM outbox WHERE entry_id = ?', [id]);
+        await tx.run('DELETE FROM entries WHERE id = ?', [id]);
+        return;
+      }
+      const now = this.clock.now().toISOString();
+      await tx.run('UPDATE entries SET deleted_at = ?, updated_at = ? WHERE id = ?', [now, now, id]);
+      await markDirty(tx, id, this.ids);
     });
   }
 

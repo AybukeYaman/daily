@@ -6,12 +6,14 @@ import Animated from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { copy, formatDay } from '../../design-system/copy';
 import { FavoriteToggle } from '../../design-system/favorite-toggle';
-import { fadeIn, fadeOut, haptic } from '../../design-system/motion';
+import { fadeIn, fadeOut, haptic, listLayout } from '../../design-system/motion';
+import { PressScale } from '../../design-system/press-scale';
 import { PressableText } from '../../design-system/pressable-text';
 import { Sheet } from '../../design-system/sheet';
 import { space, type, useTheme } from '../../design-system/theme';
 import { monthOf } from '../../features/calendar/application/month';
 import { MonthView } from '../../features/calendar/presentation/month-view';
+import { PageThumbnail } from '../../features/handwriting/presentation/page-thumbnail';
 import { createFormatState, FormatBar, toActive } from '../../features/journaling/presentation/format-bar';
 import { useCalmSaveState } from '../../features/journaling/presentation/use-calm-save-state';
 import { useEntryEditor } from '../../features/journaling/presentation/use-entry-editor';
@@ -57,6 +59,11 @@ export default function EntryScreen() {
     ]);
   };
 
+  const openPage = async (pageId: string) => {
+    const entryId = await editor.ensureEntry();
+    router.push({ pathname: '/handwriting/[entryId]', params: { entryId, page: pageId } });
+  };
+
   const openHistory = async () => {
     setSheet('none');
     await editor.flush();
@@ -86,6 +93,7 @@ export default function EntryScreen() {
           {copy.save[saveLabel]}
         </Animated.Text>
         <View style={styles.topActions}>
+          <PressableText label="✎" onPress={() => void openPage('new')} disabled={!initial} style={styles.pen} />
           <FavoriteToggle value={meta.favorite} onChange={editor.setFavorite} />
           <PressableText label="•••" onPress={() => setSheet('menu')} disabled={!initial} />
         </View>
@@ -131,8 +139,21 @@ export default function EntryScreen() {
               textShortcuts={SHORTCUTS}
               scrollEnabled={false}
               autoFocus={!initial.title && !initial.html}
-              style={{ ...type.body, color: t.text, minHeight: 320 }}
+              style={{ ...type.body, color: t.text, minHeight: editor.pages.length > 0 ? 120 : 320 }}
             />
+            {editor.pages.map((page, i) => (
+              <Animated.View key={page.id} entering={fadeIn} layout={listLayout}>
+                <PressScale
+                  onPress={() => void openPage(page.id)}
+                  scaleTo={0.98}
+                  accessibilityRole="button"
+                  accessibilityLabel={copy.handwriting.pageLabel(i + 1)}
+                  style={[styles.pageCard, { borderColor: t.hairline }]}
+                >
+                  <PageThumbnail page={page} />
+                </PressScale>
+              </Animated.View>
+            ))}
           </ScrollView>
           <FormatBar editorRef={editor.editorRef} state={formatState} focused={editor.focused} />
         </AnimatedKeyboardAvoidingView>
@@ -182,6 +203,8 @@ const styles = StyleSheet.create({
     paddingVertical: space.s,
   },
   topActions: { flexDirection: 'row', alignItems: 'center', gap: space.l },
+  pen: { fontSize: 20 },
+  pageCard: { borderWidth: StyleSheet.hairlineWidth, borderRadius: 10, marginTop: space.m, overflow: 'hidden' },
   page: { paddingHorizontal: space.l, paddingBottom: 160, maxWidth: 720, width: '100%', alignSelf: 'center', gap: space.s },
   banner: { padding: space.m, borderRadius: 10, marginBottom: space.s },
 });

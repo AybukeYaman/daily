@@ -43,6 +43,8 @@ export default function RootLayout() {
           >
             {/* Writing rises gently from below. Edge-swipe only, so selecting text never triggers "back". */}
             <Stack.Screen name="entry/[id]" options={{ animation: 'fade_from_bottom', fullScreenGestureEnabled: false }} />
+            {/* Drawing surfaces: no swipe-back, a stroke must never become "back". */}
+            <Stack.Screen name="handwriting/[entryId]" options={{ animation: 'fade_from_bottom', gestureEnabled: false }} />
             <Stack.Screen name="lab/handwriting" options={{ animation: 'fade', gestureEnabled: false }} />
           </Stack>
         </ContainerProvider>

@@ -25,6 +25,15 @@ const dark: typeof light = {
 
 export type Palette = typeof light;
 
+/**
+ * Handwriting pages look like paper in both themes, and ink colors are fixed,
+ * so a page written in dark mode reads the same in light mode (and in exports).
+ */
+export const paper = {
+  background: '#FBF8F3',
+  ink: ['#2a2724', '#b07d52', '#3d6fb6', '#5b8a5a'],
+} as const;
+
 const serif = Platform.select({ ios: 'Georgia', android: 'serif', default: 'Georgia, "Times New Roman", serif' });
 
 export const type = {

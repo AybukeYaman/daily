@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
   backoffMs,
-  contentFromRich,
   contentFromText,
   editorHtmlOf,
+  EntryContentSchema,
+  handwritingBlocksOf,
+  isEmptyContent,
+  withBlock,
+  withoutBlock,
+  withTypedContent,
   textToHtml,
   countWords,
   CredentialsSchema,
@@ -38,13 +43,13 @@ describe('content', () => {
   });
 
   it('rich blocks contribute their plain text', () => {
-    expect(toPlainText(contentFromRich('<html><p><b>Hi</b></p></html>', 'Hi'))).toBe('Hi');
+    expect(toPlainText(withTypedContent({ v: 1 as const, blocks: [] }, '<html><p><b>Hi</b></p></html>', 'Hi'))).toBe('Hi');
   });
 
   it('escapes text when converting to editor html', () => {
     expect(textToHtml('a <b> & "c"\n\nd')).toBe('<html><p>a &lt;b&gt; &amp; &quot;c&quot;</p><br><p>d</p></html>');
     expect(editorHtmlOf(contentFromText('x'))).toBe('<html><p>x</p></html>');
-    expect(editorHtmlOf(contentFromRich('<html><p>y</p></html>', 'y'))).toBe('<html><p>y</p></html>');
+    expect(editorHtmlOf(withTypedContent({ v: 1 as const, blocks: [] }, '<html><p>y</p></html>', 'y'))).toBe('<html><p>y</p></html>');
   });
 
   it('extracts plain text from blocks', () => {
@@ -81,6 +86,42 @@ describe('backoff', () => {
     expect(backoffMs(0, () => 0)).toBe(500);
     expect(backoffMs(3, () => 0.999999)).toBeLessThanOrEqual(8000);
     expect(backoffMs(50, () => 0.999999)).toBeLessThanOrEqual(300_000);
+  });
+});
+
+describe('mixed content', () => {
+  const page = (id: string, strokes = 'abc') =>
+    ({ id, type: 'handwriting', strokes, width: 400, height: 800, background: 'lined', text: '' }) as const;
+
+  it('keeps handwriting when the typed part changes', () => {
+    const c = { v: 1 as const, blocks: [...withTypedContent({ v: 1 as const, blocks: [] }, '<html><p>a</p></html>', 'a').blocks, page('p1')] };
+    const next = withTypedContent(c, '<html><p>b</p></html>', 'b');
+    expect(next.blocks.map((b) => b.type)).toEqual(['rich', 'handwriting']);
+    expect(handwritingBlocksOf(next)).toEqual([page('p1')]);
+    expect(editorHtmlOf(next)).toBe('<html><p>b</p></html>');
+    expect(toPlainText(next)).toBe('b');
+  });
+
+  it('inserts, replaces and removes blocks by id', () => {
+    let c = contentFromText('x');
+    c = withBlock(c, page('p1'));
+    c = withBlock(c, page('p2'));
+    c = withBlock(c, page('p1', 'zzz'));
+    expect(c.blocks.map((b) => b.id)).toEqual(['main', 'p1', 'p2']);
+    expect(handwritingBlocksOf(c)[0]!.strokes).toBe('zzz');
+    expect(withoutBlock(c, 'p1').blocks.map((b) => b.id)).toEqual(['main', 'p2']);
+  });
+
+  it('knows when an entry is empty', () => {
+    expect(isEmptyContent('', contentFromText('  '))).toBe(true);
+    expect(isEmptyContent('', { v: 1, blocks: [page('p', '')] })).toBe(true);
+    expect(isEmptyContent('', { v: 1, blocks: [page('p')] })).toBe(false);
+    expect(isEmptyContent('T', contentFromText(''))).toBe(false);
+  });
+
+  it('validates handwriting blocks', () => {
+    expect(EntryContentSchema.safeParse({ v: 1, blocks: [page('p')] }).success).toBe(true);
+    expect(EntryContentSchema.safeParse({ v: 1, blocks: [{ ...page('p'), background: 'dots' }] }).success).toBe(false);
   });
 });
 

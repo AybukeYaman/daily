@@ -1,4 +1,4 @@
-import { backoffMs, type EntryDto, type OpResult, type PushOp, resolveConflict } from '@daily/shared';
+import { backoffMs, type EntryDto, MAX_PUSH_BYTES, type OpResult, type PushOp, resolveConflict } from '@daily/shared';
 import type { Clock, IdGenerator, SyncStore } from '../application/ports';
 import type { SqlDatabase, SqlExecutor } from './sql/sql-database';
 import { derivedColumns, entryDataOf, type EntryRow, insertEntry, markDirty, rowToEntry } from './sqlite-entry-store';
@@ -50,6 +50,7 @@ export class SqliteSyncStore implements SyncStore {
       );
 
       const ops: PushOp[] = [];
+      let bytes = 0;
       for (const row of heads) {
         let op: PushOp | null = row.payload ? (JSON.parse(row.payload) as PushOp) : null;
         if (!op) {
@@ -59,8 +60,12 @@ export class SqliteSyncStore implements SyncStore {
             continue;
           }
         }
+        const payload = row.payload ?? JSON.stringify(op);
+        // Byte budget: big handwriting pages go in their own request. One op is always allowed.
+        if (ops.length > 0 && bytes + payload.length > MAX_PUSH_BYTES) break;
+        bytes += payload.length;
         // Freeze on first attempt: a retried opId must always carry the same payload.
-        await tx.run('UPDATE outbox SET payload = ?, attempts = attempts + 1 WHERE seq = ?', [JSON.stringify(op), row.seq]);
+        await tx.run('UPDATE outbox SET payload = ?, attempts = attempts + 1 WHERE seq = ?', [payload, row.seq]);
         ops.push(op);
       }
       return ops;

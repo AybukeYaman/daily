@@ -1,4 +1,13 @@
-import { contentFromText, type EntryData, localIsoDate, toPlainText } from '@daily/shared';
+import {
+  contentFromText,
+  type EntryData,
+  type HandwritingBlock,
+  isEmptyContent,
+  localIsoDate,
+  withBlock,
+  withoutBlock,
+  withTypedContent,
+} from '@daily/shared';
 import type {
   Clock,
   EntryStore,
@@ -70,7 +79,7 @@ export class JournalService {
    */
   async save(id: string | null, data: EntryData, options: { checkpoint?: boolean } = {}): Promise<string | null> {
     if (id === null) {
-      if (data.title.trim() === '' && toPlainText(data.content).trim() === '') return null;
+      if (isEmptyContent(data.title, data.content)) return null;
       const created = await this.store.create(data);
       this.sync.kick();
       return created;
@@ -78,6 +87,49 @@ export class JournalService {
     await this.store.save(id, data, options);
     this.sync.kick();
     return id;
+  }
+
+  /**
+   * Saves what the text editor owns (title, typed text, date, flags) without
+   * touching handwriting pages, even if they changed on another screen.
+   */
+  async saveTyped(
+    id: string | null,
+    typed: Omit<EntryData, 'content'> & { html: string; text: string },
+  ): Promise<string | null> {
+    const { html, text, ...meta } = typed;
+    if (id !== null) {
+      const updated = await this.store.update(id, (current) => ({
+        ...current,
+        ...meta,
+        content: withTypedContent(current.content, html, text),
+      }));
+      if (updated) {
+        this.sync.kick();
+        return id;
+      }
+    }
+    return this.save(id, { ...meta, content: withTypedContent({ v: 1, blocks: [] }, html, text) });
+  }
+
+  /** Creates an empty entry so a handwriting page has somewhere to live. Cleaned up by `discardIfEmpty`. */
+  createEmpty(entryDate?: string): Promise<string> {
+    return this.store.create(this.emptyDraft(entryDate));
+  }
+
+  async savePage(entryId: string, page: HandwritingBlock): Promise<void> {
+    await this.store.update(entryId, (current) => ({ ...current, content: withBlock(current.content, page) }));
+    this.sync.kick();
+  }
+
+  async removePage(entryId: string, pageId: string): Promise<void> {
+    await this.store.update(entryId, (current) => ({ ...current, content: withoutBlock(current.content, pageId) }));
+    this.sync.kick();
+  }
+
+  async discardIfEmpty(id: string): Promise<void> {
+    await this.store.discardIfEmpty(id);
+    this.sync.kick();
   }
 
   async remove(id: string): Promise<void> {

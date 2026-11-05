@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { contentFromRich, contentFromText, type EntryData } from '@daily/shared';
+import { contentFromText, type EntryData, withTypedContent } from '@daily/shared';
 import { describe, expect, it } from 'vitest';
 import { migrate } from '../apps/mobile/src/core/infrastructure/sql/migrations';
 import { SqliteEntryStore, toFtsQuery } from '../apps/mobile/src/core/infrastructure/sqlite-entry-store';
@@ -106,7 +106,7 @@ describe('search', () => {
   it.each([true, false])('finds by title and body, prefix and accents (fts=%s)', async (fts) => {
     const { journal } = await journalWith(fts);
     await journal.save(null, entry('İstanbul’da güzel bir gün geçirdim', { title: 'Hafta sonu' }));
-    await journal.save(null, { ...entry(''), content: contentFromRich('<html><p><b>Toplantı</b> notları</p></html>', 'Toplantı notları') });
+    await journal.save(null, { ...entry(''), content: withTypedContent({ v: 1, blocks: [] }, '<html><p><b>Toplantı</b> notları</p></html>', 'Toplantı notları') });
     await journal.save(null, entry('nothing here'));
 
     expect((await journal.search(q('Hafta'))).length).toBe(1);

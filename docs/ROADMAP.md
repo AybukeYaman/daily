@@ -16,8 +16,8 @@ Her faz açıkça açılır ve kapanır. Bir faz, "Definition of Done" sağlanma
 | 1 | Monorepo, NestJS API (auth, yetki, hata, log), Prisma şeması, Expo temeli, tasarım sistemi, ilk testler | 🟡 Kod + testler tamam. Açık: ilk migration'ı senin makinede `prisma migrate dev --name init` ile üretmek (bulut ortamı Prisma engine'ini indiremedi) ve gerçek Postgres'e karşı repository entegrasyon testi |
 | 2 | Local-first kalıcılık: SQLite, outbox, autosave, senkron motoru, çakışma koruması, sürüm geçmişi (server) | 🟡 Çekirdek + 9 cihaz⇄sunucu senaryosu yeşil. Açık: gerçek iOS/Android cihazda arka plana alma / öldürme testi |
 | 3 | Günlük: native zengin metin editörü, arşiv/favori, çöp kutusu + geri getirme, tarih değiştirme, cihazda FTS5 arama, aylık takvim, sürüm geçmişi (API + UI) | 🟡 Kod + 57 test yeşil, iOS/Android bundle temiz. Açık: gerçek cihazda yazma gecikmesi ölçümü (ADR 0003) |
-| 4a | El yazısı motoru prototipi + ölçüm laboratuvarı (Skia, UI thread) | 🟡 Kod + testler tamam. Açık: S26'da ölçüm (docs/MEASURE.md) |
-| 4b | El yazısının yazılara entegrasyonu: sayfa, zoom/pan, arka plan, kalıcılık, kurtarma | ⏳ ölçüm sonrası |
+| 4a | El yazısı motoru prototipi + ölçüm laboratuvarı (Skia, UI thread) | ✅ Kapandı — S26 (120 Hz, parmak) kullanıcı testinde kabul edildi |
+| 4b | El yazısının yazılara entegrasyonu: yazı + sayfalar bir arada, zoom/pan, düz/çizgili/kareli, her çizgide kayıt, arka plana geçince kayıt, büyüyen sayfa | 🟡 Kod + 91 test yeşil. Açık: S26'da kullanım testi |
 | 4c | iPad Pro M4 + Apple Pencil: basınç, eğim, palm rejection ölçümü | ⏳ Apple cihaza kurulum erişimi gerekiyor |
 | 5 | Fotoğraf/video: S3 uyumlu depolama, multipart/resumable upload, küçük resim | ⏳ |
 | 6 | Native widget'lar (WidgetKit / Android App Widgets) | ⏳ |
@@ -54,4 +54,4 @@ Etiketler, ayraç (separator — editör kütüphanesi desteklemiyor), yıllık 
 
 ## Sıradaki adım
 
-Faz 4a ölçümü: `docs/MEASURE.md` adımlarıyla S26'da release build. Sonuçlar bütçeye uyarsa 4b'ye geçilir; uymazsa önce darboğaz giderilir (ADR 0004, son madde).
+Faz 5 — fotoğraf ve video: S3 uyumlu depolama, kesintiye dayanıklı yükleme, küçük resimler.

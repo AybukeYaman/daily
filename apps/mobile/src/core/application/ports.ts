@@ -48,7 +48,16 @@ export interface EntryStore {
   create(data: EntryData): Promise<string>;
   /** `checkpoint`: the server keeps the replaced state as a version (used by restore). */
   save(id: string, data: EntryData, options?: { checkpoint?: boolean }): Promise<void>;
+  /**
+   * Read-modify-write in one transaction: `change` receives the stored data and
+   * returns the new data. Two screens editing different parts of the same entry
+   * (typed text, handwriting pages) can never overwrite each other.
+   * Returns false if the entry does not exist.
+   */
+  update(id: string, change: (current: EntryData) => EntryData, options?: { checkpoint?: boolean }): Promise<boolean>;
   softDelete(id: string): Promise<void>;
+  /** Removes an entry that has nothing in it. Never-synced entries vanish; synced ones go to trash. */
+  discardIfEmpty(id: string): Promise<void>;
   restore(id: string): Promise<void>;
   /** Non-archived, non-deleted entries, newest day first. */
   timeline(limit: number, after?: TimelineCursor): Promise<TimelinePage>;

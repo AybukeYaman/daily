@@ -1,5 +1,6 @@
-import { contentFromRich, editorHtmlOf, type EntryData, textToHtml, toPlainText } from '@daily/shared';
-import { useEffect, useRef, useState } from 'react';
+import { editorHtmlOf, type EntryData, type HandwritingBlock, handwritingBlocksOf, textToHtml, toPlainText } from '@daily/shared';
+import { useFocusEffect } from 'expo-router';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 import type { EnrichedTextInputInstance } from 'react-native-enriched-html';
 import { observable } from '../../../core/application/observable';
@@ -43,6 +44,7 @@ export function useEntryEditor(routeId: string, initialDate?: string) {
     return { entryDate, favorite, archived, conflictOf };
   });
 
+  const [pages, setPages] = useState<HandwritingBlock[]>([]);
   const editorRef = useRef<EnrichedTextInputInstance>(null);
   const idRef = useRef<string | null>(routeId === 'new' ? null : routeId);
   const snapshot = useRef<Snapshot>({ title: '', text: '', meta });
@@ -52,8 +54,8 @@ export function useEntryEditor(routeId: string, initialDate?: string) {
   const autosave = useRef<AutosaveController<Snapshot> | null>(null);
   autosave.current ??= new AutosaveController<Snapshot>(async (s) => {
     const html = (await withTimeout(editorRef.current?.getHTML() ?? Promise.resolve(null), HTML_TIMEOUT_MS)) ?? textToHtml(s.text);
-    const data: EntryData = { ...s.meta, title: s.title, content: contentFromRich(html, s.text) };
-    idRef.current = await journal.save(idRef.current, data);
+    // Only the typed part is written; handwriting pages saved on their own screen are preserved.
+    idRef.current = await journal.saveTyped(idRef.current, { ...s.meta, title: s.title, html, text: s.text });
   }, setSaveState);
 
   useEffect(() => {
@@ -71,6 +73,7 @@ export function useEntryEditor(routeId: string, initialDate?: string) {
         const m: Meta = { entryDate: entry.entryDate, favorite: entry.favorite, archived: entry.archived, conflictOf: entry.conflictOf };
         snapshot.current = { title: entry.title, text: toPlainText(entry.content), meta: m };
         setMetaState(m);
+        setPages(handwritingBlocksOf(entry.content));
         setInitial({ title: entry.title, html: editorHtmlOf(entry.content), isConflictCopy: entry.conflictOf !== null });
       });
     }
@@ -81,9 +84,25 @@ export function useEntryEditor(routeId: string, initialDate?: string) {
     return () => {
       active = false;
       sub.remove();
-      void controller.flush();
+      // Save, then drop the entry if it ended up with nothing in it (e.g. opened a page, drew nothing).
+      void controller.flush().then(async () => {
+        if (idRef.current) await journal.discardIfEmpty(idRef.current);
+      });
     };
   }, [journal]);
+
+  // Pages are edited on their own screen; re-read them when coming back.
+  useFocusEffect(
+    useCallback(() => {
+      const id = idRef.current;
+      if (!id) return;
+      let active = true;
+      void journal.get(id).then((entry) => active && entry && setPages(handwritingBlocksOf(entry.content)));
+      return () => {
+        active = false;
+      };
+    }, [journal]),
+  );
 
   const schedule = (patch: Partial<Snapshot>) => {
     snapshot.current = { ...snapshot.current, ...patch };
@@ -111,6 +130,13 @@ export function useEntryEditor(routeId: string, initialDate?: string) {
     setArchived: (archived: boolean) => setMeta({ archived }),
     setEntryDate: (entryDate: string) => setMeta({ entryDate }),
     flush: () => autosave.current!.flush(),
+    pages,
+    /** Makes sure the entry exists (saving what was typed) and returns its id, for opening a page. */
+    async ensureEntry(): Promise<string> {
+      await autosave.current!.flush();
+      idRef.current ??= await journal.createEmpty(snapshot.current.meta.entryDate);
+      return idRef.current;
+    },
     /** Flushes, then soft-deletes. Returns false when there was nothing persisted to delete. */
     async remove(): Promise<boolean> {
       await autosave.current!.flush();

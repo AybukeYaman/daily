@@ -1,17 +1,19 @@
-import { MAX_COORD, type Tool } from '@daily/shared';
+import { MAX_COORD, type PageBackground, type Tool } from '@daily/shared';
 import {
   Canvas,
+  Group,
   Path,
   Picture,
   Skia,
+  type SkCanvas,
   type SkPath,
   type SkPathBuilder,
   type SkPicture,
 } from '@shopify/react-native-skia';
 import { useEffect, useMemo, useRef } from 'react';
 import { StyleSheet } from 'react-native';
-import { GestureDetector, PointerType, usePanGesture } from 'react-native-gesture-handler';
-import { type SharedValue, useFrameCallback, useSharedValue } from 'react-native-reanimated';
+import { GestureDetector, PointerType, usePanGesture, usePinchGesture, useSimultaneousGestures } from 'react-native-gesture-handler';
+import { type SharedValue, useDerivedValue, useFrameCallback, useSharedValue } from 'react-native-reanimated';
 import { scheduleOnRN, scheduleOnUI } from 'react-native-worklets';
 import type { CanvasTool, HandwritingSession, StrokeStyle } from '../application/handwriting-session';
 import { emptyPicture, PictureCache } from './picture-cache';
@@ -21,6 +23,12 @@ import { effectiveOpacity, effectiveWidth, makeStrokePaint } from './stroke-pain
 const TAIL_SEGMENTS = 48;
 const CULL = Skia.XYWHRect(-MAX_COORD, -MAX_COORD, MAX_COORD * 2, MAX_COORD * 2);
 const PROBE_CAPACITY = 600;
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 4;
+/** Ruling pitch in document px (lined and grid backgrounds). */
+const RULE = 32;
+/** The page grows so there is always this much empty space below the lowest ink. */
+const GROW_MARGIN = 600;
 
 export interface LatencyProbe {
   /** ms from a touch sample reaching the UI thread to the next frame callback. */
@@ -53,11 +61,16 @@ function pushCapped(sv: SharedValue<number[]>, v: number): void {
   }, false);
 }
 
-function recordPicture(draw: (canvas: ReturnType<ReturnType<typeof Skia.PictureRecorder>['beginRecording']>) => void): SkPicture {
+function recordPicture(draw: (canvas: SkCanvas) => void): SkPicture {
   'worklet';
   const rec = Skia.PictureRecorder();
   draw(rec.beginRecording(CULL));
   return rec.finishRecordingAsPicture();
+}
+
+function clamp(v: number, min: number, max: number): number {
+  'worklet';
+  return v < min ? min : v > max ? max : v;
 }
 
 interface Props {
@@ -65,11 +78,23 @@ interface Props {
   tool: CanvasTool;
   color: string;
   width: number;
-  /** Ignore finger touches (palm rejection) when a stylus is in use. */
+  /** Finger touches scroll instead of drawing (palm rejection) when a stylus is in use. */
   stylusOnly?: boolean;
   /** Bump after undo/redo/clear done by the parent, to re-record committed strokes. */
   revision: number;
+  /** Page ruling, drawn in document space so it zooms with the ink. */
+  background?: PageBackground;
+  /** Stored page height; the page grows below the lowest ink as you write. */
+  pageHeight?: number;
+  /**
+   * Page width in document px. The page always fills the view width at zoom 1,
+   * so a page written on a phone opens at the same proportions on a tablet.
+   * 0 = use the view width (measurement lab).
+   */
+  pageWidth?: number;
   onChange?: () => void;
+  /** Reports the page height needed to contain all ink plus margin. */
+  onPageHeight?: (height: number) => void;
   probe?: LatencyProbe;
 }
 
@@ -80,8 +105,24 @@ interface Props {
  * which simplifies, commits and appends them to the committed picture; until
  * that lands, the finished stroke stays visible in a UI-side pending picture,
  * so nothing flickers even if the next stroke starts immediately.
+ *
+ * Viewport: one finger draws; two fingers pinch-zoom (1–4×) and pan. Ink is
+ * stored in document space, so zoom never changes what is saved.
  */
-export function HandwritingCanvas({ session, tool, color, width, stylusOnly = false, revision, onChange, probe }: Props) {
+export function HandwritingCanvas({
+  session,
+  tool,
+  color,
+  width,
+  stylusOnly = false,
+  revision,
+  background = 'blank',
+  pageHeight = 0,
+  pageWidth = 0,
+  onChange,
+  onPageHeight,
+  probe,
+}: Props) {
   const cache = useRef(new PictureCache()).current;
   const blank = useMemo(() => emptyPicture(), []);
   const blankPath = useMemo(() => Skia.Path.Make(), []);
@@ -96,6 +137,24 @@ export function HandwritingCanvas({ session, tool, color, width, stylusOnly = fa
   const liveWidth = useSharedValue(effectiveWidth('pen', width));
   const liveOpacity = useSharedValue(1);
 
+  // Viewport (document → screen: translate, then scale)
+  const viewW = useSharedValue(0);
+  const viewH = useSharedValue(0);
+  const docH = useSharedValue(pageHeight);
+  const zoom = useSharedValue(1);
+  const tx = useSharedValue(0);
+  const ty = useSharedValue(0);
+  const gestureZoom = useSharedValue(1);
+  const gestureTx = useSharedValue(0);
+  const gestureTy = useSharedValue(0);
+  const navigating = useSharedValue(false);
+  const pageW = useSharedValue(pageWidth);
+  useEffect(() => {
+    pageW.value = pageWidth;
+  }, [pageWidth, pageW]);
+  /** Document px → view px at zoom 1. */
+  const base = useDerivedValue(() => (pageW.value > 0 && viewW.value > 0 ? viewW.value / pageW.value : 1));
+
   // Tool settings mirrored to the UI thread
   const toolSv = useSharedValue<CanvasTool>(tool);
   const colorSv = useSharedValue(color);
@@ -107,6 +166,9 @@ export function HandwritingCanvas({ session, tool, color, width, stylusOnly = fa
     widthSv.value = width;
     stylusOnlySv.value = stylusOnly;
   }, [tool, color, width, stylusOnly, toolSv, colorSv, widthSv, stylusOnlySv]);
+  useEffect(() => {
+    if (pageHeight > docH.value) docH.value = pageHeight;
+  }, [pageHeight, docH]);
 
   // UI-thread stroke state
   const builder = useSharedValue<SkPathBuilder | null>(null);
@@ -126,10 +188,49 @@ export function HandwritingCanvas({ session, tool, color, width, stylusOnly = fa
   const lastEraseX = useSharedValue(0);
   const lastEraseY = useSharedValue(0);
 
-  // Committed picture follows the document (undo/redo/erase from the parent).
+  // Committed picture follows the document (undo/redo/erase/load from the parent).
   useEffect(() => {
     committed.value = cache.rebuild(session.doc.all);
   }, [revision, session, cache, committed]);
+
+  // --- Derived render values ------------------------------------------------------
+  const matrix = useDerivedValue(() => {
+    const m = Skia.Matrix();
+    const s = zoom.value * base.value;
+    m.translate(tx.value, ty.value);
+    m.scale(s, s);
+    return m;
+  });
+
+  const ruling = useDerivedValue(() => {
+    const w = viewW.value / base.value;
+    const h = Math.max(docH.value, viewH.value / base.value);
+    const b = Skia.PathBuilder.Make();
+    if (background !== 'blank' && w > 0) {
+      for (let y = RULE * 2; y < h; y += RULE) b.moveTo(0, y).lineTo(w, y);
+      if (background === 'grid') for (let x = RULE; x < w; x += RULE) b.moveTo(x, 0).lineTo(x, h);
+    }
+    return b.detach();
+  }, [background]);
+
+  // --- Viewport helpers (UI thread) ----------------------------------------------
+  const clampViewport = () => {
+    'worklet';
+    const s = zoom.value * base.value;
+    const contentW = viewW.value * zoom.value;
+    const contentH = Math.max(docH.value * s, viewH.value * zoom.value);
+    tx.value = clamp(tx.value, Math.min(0, viewW.value - contentW), 0);
+    ty.value = clamp(ty.value, Math.min(0, viewH.value - contentH), 0);
+  };
+
+  const toDocX = (x: number) => {
+    'worklet';
+    return (x - tx.value) / (zoom.value * base.value);
+  };
+  const toDocY = (y: number) => {
+    'worklet';
+    return (y - ty.value) / (zoom.value * base.value);
+  };
 
   // --- JS-thread handlers ------------------------------------------------------
   const dropPending = (gen: number) => {
@@ -141,9 +242,21 @@ export function HandwritingCanvas({ session, tool, color, width, stylusOnly = fa
     });
   };
 
+  const growPage = (maxY: number) => {
+    'worklet';
+    const needed = maxY + GROW_MARGIN;
+    if (needed > docH.value) docH.value = needed;
+  };
+
   const commitOnJS = (raw: number[], style: StrokeStyle, startedAt: number, gen: number) => {
     const stroke = session.commit(raw, style, startedAt);
-    if (stroke) committed.value = cache.append(stroke, session.doc.all);
+    if (stroke) {
+      committed.value = cache.append(stroke, session.doc.all);
+      let maxY = 0;
+      for (let i = 1; i < stroke.samples.length; i += 6) maxY = Math.max(maxY, stroke.samples[i]!);
+      scheduleOnUI(growPage, maxY);
+      onPageHeight?.(maxY + GROW_MARGIN);
+    }
     scheduleOnUI(dropPending, gen); // queued after the picture update: no gap, no double draw
     onChange?.();
   };
@@ -155,7 +268,7 @@ export function HandwritingCanvas({ session, tool, color, width, stylusOnly = fa
     }
   };
 
-  // --- UI-thread gesture ---------------------------------------------------------
+  // --- UI-thread drawing -----------------------------------------------------------
   const markEvent = () => {
     'worklet';
     if (probe && probe.pendingEventAt.value === 0) probe.pendingEventAt.value = now();
@@ -179,17 +292,41 @@ export function HandwritingCanvas({ session, tool, color, width, stylusOnly = fa
     }, false);
   };
 
-  const pan = usePanGesture({
+  /** Drops the stroke in progress without saving (a second finger arrived: it was a zoom, not ink). */
+  const abortStroke = () => {
+    'worklet';
+    if (!active.value) return;
+    active.value = false;
+    builder.value = null;
+    prefix.value = blank;
+    tail.value = blankPath;
+    tip.value = blankPath;
+  };
+
+  /** With "stylus only", a finger scrolls the page instead of drawing. */
+  const isFingerScroll = (pointer: PointerType) => {
+    'worklet';
+    return stylusOnlySv.value && pointer !== PointerType.STYLUS;
+  };
+
+  const draw = usePanGesture({
     minDistance: 0,
     maxPointers: 1,
     shouldCancelWhenOutside: false,
     onBegin: (e) => {
       'worklet';
-      if (stylusOnlySv.value && e.pointerType !== PointerType.STYLUS) return;
+      if (navigating.value) return;
+      if (isFingerScroll(e.pointerType)) {
+        gestureTx.value = tx.value;
+        gestureTy.value = ty.value;
+        return;
+      }
+      const x = toDocX(e.x);
+      const y = toDocY(e.y);
       if (toolSv.value === 'eraser') {
-        lastEraseX.value = e.x;
-        lastEraseY.value = e.y;
-        scheduleOnRN(eraseOnJS, e.x, e.y, widthSv.value * 3);
+        lastEraseX.value = x;
+        lastEraseY.value = y;
+        scheduleOnRN(eraseOnJS, x, y, (widthSv.value * 3) / (zoom.value * base.value));
         return;
       }
       const t: Tool = toolSv.value;
@@ -198,9 +335,9 @@ export function HandwritingCanvas({ session, tool, color, width, stylusOnly = fa
       startTime.value = now();
       startEpoch.value = Date.now();
       samples.value = [];
-      pushSample(e.x, e.y, e.pointerType, e.stylusData?.pressure ?? 0.5, e.stylusData?.altitudeAngle ?? 0, e.stylusData?.azimuthAngle ?? 0);
-      prevX.value = e.x;
-      prevY.value = e.y;
+      pushSample(x, y, e.pointerType, e.stylusData?.pressure ?? 0.5, e.stylusData?.altitudeAngle ?? 0, e.stylusData?.azimuthAngle ?? 0);
+      prevX.value = x;
+      prevY.value = y;
       segments.value = 0;
 
       liveTool.value = t;
@@ -210,38 +347,49 @@ export function HandwritingCanvas({ session, tool, color, width, stylusOnly = fa
       liveOpacity.value = effectiveOpacity(t);
 
       const b = Skia.PathBuilder.Make();
-      b.moveTo(e.x, e.y);
+      b.moveTo(x, y);
       builder.value = b;
       prefix.value = recordPicture(() => {});
       tail.value = blankPath;
       // A dot appears under the finger on touch-down, before any movement.
-      tip.value = Skia.PathBuilder.Make().moveTo(e.x, e.y).lineTo(e.x + 0.01, e.y).detach();
+      tip.value = Skia.PathBuilder.Make().moveTo(x, y).lineTo(x + 0.01, y).detach();
       markEvent();
     },
     onUpdate: (e) => {
       'worklet';
+      if (navigating.value || e.numberOfPointers > 1) {
+        abortStroke();
+        return;
+      }
+      if (isFingerScroll(e.pointerType)) {
+        tx.value = gestureTx.value + e.translationX;
+        ty.value = gestureTy.value + e.translationY;
+        clampViewport();
+        return;
+      }
+      const x = toDocX(e.x);
+      const y = toDocY(e.y);
       if (toolSv.value === 'eraser') {
-        if (stylusOnlySv.value && e.pointerType !== PointerType.STYLUS) return;
-        const r = widthSv.value * 3;
-        const dx = e.x - lastEraseX.value;
-        const dy = e.y - lastEraseY.value;
+        const r = (widthSv.value * 3) / (zoom.value * base.value);
+        const dx = x - lastEraseX.value;
+        const dy = y - lastEraseY.value;
         if (dx * dx + dy * dy >= (r / 2) * (r / 2)) {
-          lastEraseX.value = e.x;
-          lastEraseY.value = e.y;
-          scheduleOnRN(eraseOnJS, e.x, e.y, r);
+          lastEraseX.value = x;
+          lastEraseY.value = y;
+          scheduleOnRN(eraseOnJS, x, y, r);
         }
         return;
       }
       const b = builder.value;
       if (!active.value || !b) return;
-      pushSample(e.x, e.y, e.pointerType, e.stylusData?.pressure ?? 0.5, e.stylusData?.altitudeAngle ?? 0, e.stylusData?.azimuthAngle ?? 0);
+      pushSample(x, y, e.pointerType, e.stylusData?.pressure ?? 0.5, e.stylusData?.altitudeAngle ?? 0, e.stylusData?.azimuthAngle ?? 0);
 
       // Same smoothing as the committed stroke: quad through midpoints, previous sample as control.
-      const mx = (prevX.value + e.x) / 2;
-      const my = (prevY.value + e.y) / 2;
+      const mx = (prevX.value + x) / 2;
+      const my = (prevY.value + y) / 2;
       b.quadTo(prevX.value, prevY.value, mx, my);
-      prevX.value = e.x;
-      prevY.value = e.y;
+      prevX.value = x;
+      prevY.value = y;
       segments.value += 1;
 
       if (segments.value >= TAIL_SEGMENTS) {
@@ -261,13 +409,17 @@ export function HandwritingCanvas({ session, tool, color, width, stylusOnly = fa
         tail.value = b.build();
       }
       // Ink reaches the finger: straight tip from the last midpoint to the current sample.
-      tip.value = Skia.PathBuilder.Make().moveTo(mx, my).lineTo(e.x, e.y).detach();
+      tip.value = Skia.PathBuilder.Make().moveTo(mx, my).lineTo(x, y).detach();
       markEvent();
     },
-    onFinalize: () => {
+    onFinalize: (e) => {
       'worklet';
       const b = builder.value;
       if (!active.value || !b) return;
+      if (e.canceled || navigating.value) {
+        abortStroke();
+        return;
+      }
       active.value = false;
       b.lineTo(prevX.value, prevY.value);
       const finalTail = b.detach();
@@ -304,6 +456,56 @@ export function HandwritingCanvas({ session, tool, color, width, stylusOnly = fa
     },
   });
 
+  // --- Two-finger zoom and pan ------------------------------------------------------
+  const pinch = usePinchGesture({
+    onBegin: () => {
+      'worklet';
+      navigating.value = true;
+      abortStroke();
+      gestureZoom.value = zoom.value;
+      gestureTx.value = tx.value;
+      gestureTy.value = ty.value;
+    },
+    onUpdate: (e) => {
+      'worklet';
+      const next = clamp(gestureZoom.value * e.scale, MIN_ZOOM * 0.9, MAX_ZOOM * 1.1);
+      const k = next / gestureZoom.value;
+      // Keep the point under the fingers fixed while scaling.
+      tx.value = e.focalX - (e.focalX - gestureTx.value) * k;
+      ty.value = e.focalY - (e.focalY - gestureTy.value) * k;
+      zoom.value = next;
+    },
+    onFinalize: () => {
+      'worklet';
+      // Pinching slightly past the limits feels elastic; on release, snap back inside them.
+      zoom.value = clamp(zoom.value, MIN_ZOOM, MAX_ZOOM);
+      clampViewport();
+      navigating.value = false;
+    },
+  });
+
+  const twoFingerPan = usePanGesture({
+    minPointers: 2,
+    onBegin: () => {
+      'worklet';
+      navigating.value = true;
+      abortStroke();
+    },
+    onUpdate: (e) => {
+      'worklet';
+      tx.value += e.changeX;
+      ty.value += e.changeY;
+      clampViewport();
+    },
+    onFinalize: () => {
+      'worklet';
+      clampViewport();
+      navigating.value = false;
+    },
+  });
+
+  const gestures = useSimultaneousGestures(draw, pinch, twoFingerPan);
+
   // Latency probe: only runs when a probe is attached (measurement lab).
   useFrameCallback((frame) => {
     'worklet';
@@ -317,13 +519,22 @@ export function HandwritingCanvas({ session, tool, color, width, stylusOnly = fa
   }, probe !== undefined);
 
   return (
-    <GestureDetector gesture={pan}>
-      <Canvas style={StyleSheet.absoluteFill}>
-        <Picture picture={committed} />
-        <Picture picture={pending} />
-        <Picture picture={prefix} />
-        <Path path={tail} color={liveColor} strokeWidth={liveWidth} opacity={liveOpacity} style="stroke" strokeCap="round" strokeJoin="round" />
-        <Path path={tip} color={liveColor} strokeWidth={liveWidth} opacity={liveOpacity} style="stroke" strokeCap="round" strokeJoin="round" />
+    <GestureDetector gesture={gestures}>
+      <Canvas
+        style={StyleSheet.absoluteFill}
+        onLayout={(e) => {
+          viewW.value = e.nativeEvent.layout.width;
+          viewH.value = e.nativeEvent.layout.height;
+        }}
+      >
+        <Group matrix={matrix}>
+          <Path path={ruling} color="rgba(140,133,124,0.22)" style="stroke" strokeWidth={1} />
+          <Picture picture={committed} />
+          <Picture picture={pending} />
+          <Picture picture={prefix} />
+          <Path path={tail} color={liveColor} strokeWidth={liveWidth} opacity={liveOpacity} style="stroke" strokeCap="round" strokeJoin="round" />
+          <Path path={tip} color={liveColor} strokeWidth={liveWidth} opacity={liveOpacity} style="stroke" strokeCap="round" strokeJoin="round" />
+        </Group>
       </Canvas>
     </GestureDetector>
   );

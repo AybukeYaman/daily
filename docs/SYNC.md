@@ -29,7 +29,7 @@ Base path: `/v1`. All bodies JSON, validated with the zod schemas in `@daily/sha
 
 Upserts may carry `"checkpoint": true` (sent when restoring an old version): the server then always snapshots the state being replaced.
 
-Max 50 ops per call. Each op is applied in its own transaction:
+Max 50 ops per call. Devices also stop adding ops once the payload passes 4 MB (handwriting pages can be large); the server accepts bodies up to 16 MB. Each op is applied in its own transaction:
 
 1. If `(userId, opId)` was already processed → the stored result is returned unchanged (safe retry after a lost response).
 2. Entry owned by another user → `rejected` (no information leak).
